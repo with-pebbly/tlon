@@ -1,0 +1,22 @@
+{
+	"name": "@tlon/cli",
+	"version": "0.0.0",
+	"private": true,
+	"bin": {
+		"tlon": "./src/main.ts"
+	},
+	"type": "module",
+	"scripts": {
+		"check": "tsc -p tsconfig.json"
+	},
+	"dependencies": {
+		"@tlon/contracts": "workspace:*",
+		"@tlon/core": "workspace:*",
+		"@tlon/store": "workspace:*",
+		"commander": "^15.0.0"
+	},
+	"devDependencies": {
+		"@types/node": "^24.0.0",
+		"typescript": "^6.0.3"
+	}
+}

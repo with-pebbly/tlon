@@ -1,0 +1,331 @@
+import {
+	type Artifact,
+	type ArtifactKind,
+	type ArtifactPage,
+	ArtifactListQuery,
+	CreateArtifactInput,
+	TlonError,
+	type Principal,
+	type ArtifactRevision,
+	UpdateArtifactInput,
+	type RevisionList
+} from '@tlon/contracts';
+import { parseStructured } from '@tlon/contracts';
+import { and, asc, desc, eq, gt, ilike, inArray, or } from 'drizzle-orm';
+
+import type { Db } from './db.ts';
+import { asUuid, audit, authorize, guardValidation, parseInput, type Ctx } from './internal.ts';
+import {
+	type ArtifactWithVersion,
+	getArtifactRow,
+	selectArtifacts,
+	snapshotOf,
+	toArtifact,
+	toRevision
+} from './projections.ts';
+import {
+	artifactRevisions,
+	artifacts,
+	expansionCandidates,
+	expansions,
+	type ArtifactRow
+} from './schema.ts';
+
+type ArtifactChange = Partial<
+	Pick<
+		ArtifactRow,
+		'kind' | 'title' | 'body' | 'structured' | 'status' | 'ownerScope' | 'locked' | 'pinned'
+	>
+>;
+
+/**
+ * Appends a revision and moves the artifact head with a conditional update
+ * (`WHERE head_revision_id = <expected>`), so concurrent writers cannot both win.
+ */
+export async function appendRevision(
+	ctx: Ctx,
+	q: Db,
+	principal: Principal,
+	current: ArtifactWithVersion,
+	change: ArtifactChange,
+	reason: string | null
+): Promise<ArtifactWithVersion> {
+	const now = ctx.now();
+	const revisionId = ctx.newId();
+	const [updated] = await q
+		.update(artifacts)
+		.set({ ...change, headRevisionId: revisionId, updatedAt: now })
+		.where(
+			and(
+				eq(artifacts.id, current.row.id),
+				eq(artifacts.projectId, current.row.projectId),
+				eq(artifacts.headRevisionId, current.row.headRevisionId)
+			)
+		)
+		.returning();
+	if (!updated) {
+		const [latest] = await q
+			.select({ head: artifacts.headRevisionId })
+			.from(artifacts)
+			.where(eq(artifacts.id, current.row.id));
+		throw new TlonError('STALE_REVISION', 'artifact changed since the expected revision', {
+			currentRevisionId: latest?.head ?? null
+		});
+	}
+	const version = current.version + 1;
+	await q.insert(artifactRevisions).values({
+		id: revisionId,
+		artifactId: updated.id,
+		version,
+		snapshot: snapshotOf(updated),
+		actorId: principal.id,
+		reason,
+		createdAt: now
+	});
+	return { row: updated, version };
+}
+
+/** Inserts a brand-new artifact plus its revision v1. Caller owns the transaction. */
+export async function insertArtifact(
+	ctx: Ctx,
+	q: Db,
+	principal: Principal,
+	projectId: string,
+	values: Pick<
+		ArtifactRow,
+		'kind' | 'title' | 'body' | 'structured' | 'status' | 'ownerScope' | 'locked' | 'pinned'
+	>,
+	reason: string | null
+): Promise<Artifact> {
+	const now = ctx.now();
+	const id = ctx.newId();
+	const revisionId = ctx.newId();
+	const [row] = await q
+		.insert(artifacts)
+		.values({
+			...values,
+			id,
+			projectId,
+			creatorRole: principal.role,
+			headRevisionId: revisionId,
+			createdAt: now,
+			updatedAt: now
+		})
+		.returning();
+	if (!row) throw new TlonError('INTERNAL', 'artifact insert returned no row');
+	await q.insert(artifactRevisions).values({
+		id: revisionId,
+		artifactId: id,
+		version: 1,
+		snapshot: snapshotOf(row),
+		actorId: principal.id,
+		reason,
+		createdAt: now
+	});
+	return toArtifact(row, 1);
+}
+
+const escapeLike = (value: string) => value.replace(/[\\%_]/g, (c) => `\\${c}`);
+
+function decodeCursor(cursor: string): { at: Date; id: string } {
+	const [ms, id] = cursor.split('_');
+	const at = new Date(Number(ms));
+	if (!ms || !id || Number.isNaN(at.getTime()) || !/^[0-9a-f-]{36}$/.test(id)) {
+		throw new TlonError('VALIDATION_FAILED', 'malformed cursor');
+	}
+	return { at, id };
+}
+
+export function artifactMethods(ctx: Ctx) {
+	const { db } = ctx;
+	return {
+		async listArtifacts(
+			principal: Principal,
+			projectId: string,
+			query: unknown = {}
+		): Promise<ArtifactPage> {
+			const q = parseInput(ArtifactListQuery, query);
+			await authorize(db, principal, projectId, 'read');
+			const filters = [
+				q.kind ? eq(artifacts.kind, q.kind) : undefined,
+				q.status ? eq(artifacts.status, q.status) : undefined,
+				q.q
+					? or(
+							ilike(artifacts.title, `%${escapeLike(q.q)}%`),
+							ilike(artifacts.body, `%${escapeLike(q.q)}%`)
+						)
+					: undefined
+			];
+			if (q.cursor) {
+				const { at, id } = decodeCursor(q.cursor);
+				filters.push(
+					or(gt(artifacts.createdAt, at), and(eq(artifacts.createdAt, at), gt(artifacts.id, id)))
+				);
+			}
+			const items = await selectArtifacts(db, principal, projectId, and(...filters), {
+				limit: q.limit + 1
+			});
+			const page = items.slice(0, q.limit);
+			const last = page.at(-1);
+			return {
+				items: page,
+				nextCursor:
+					items.length > q.limit && last ? `${new Date(last.createdAt).getTime()}_${last.id}` : null
+			};
+		},
+
+		async createArtifact(
+			principal: Principal,
+			projectId: string,
+			input: unknown
+		): Promise<Artifact> {
+			const data = parseInput(CreateArtifactInput, input);
+			return db.transaction(async (tx) => {
+				const project = await authorize(tx, principal, projectId, 'write');
+				const structured = guardValidation(() =>
+					parseStructured(project.domain as 'NARRATIVE' | 'GENERIC', data.kind, data.structured)
+				);
+				const artifact = await insertArtifact(
+					ctx,
+					tx,
+					principal,
+					projectId,
+					{
+						kind: data.kind,
+						title: data.title,
+						body: data.body,
+						structured,
+						status: data.status,
+						ownerScope: data.ownerScope,
+						locked: data.locked,
+						pinned: data.pinned
+					},
+					data.reason ?? null
+				);
+				await audit(ctx, tx, principal, projectId, 'artifact.create', artifact.id, {
+					kind: data.kind
+				});
+				return artifact;
+			});
+		},
+
+		async getArtifact(principal: Principal, projectId: string, id: string): Promise<Artifact> {
+			await authorize(db, principal, projectId, 'read');
+			asUuid(id, 'ARTIFACT_NOT_FOUND');
+			const { row, version } = await getArtifactRow(db, principal, projectId, id);
+			return toArtifact(row, version);
+		},
+
+		async updateArtifact(
+			principal: Principal,
+			projectId: string,
+			id: string,
+			expectedRevisionId: string | undefined,
+			input: unknown
+		): Promise<Artifact> {
+			if (expectedRevisionId === undefined || expectedRevisionId === '') {
+				throw new TlonError(
+					'PRECONDITION_REQUIRED',
+					'If-Match with the head revision id is required'
+				);
+			}
+			const patch = parseInput(UpdateArtifactInput, input);
+			return db.transaction(async (tx) => {
+				const project = await authorize(tx, principal, projectId, 'write');
+				asUuid(id, 'ARTIFACT_NOT_FOUND');
+				const current = await getArtifactRow(tx, principal, projectId, id);
+				if (current.row.headRevisionId !== expectedRevisionId) {
+					throw new TlonError('STALE_REVISION', 'artifact changed since the expected revision', {
+						currentRevisionId: current.row.headRevisionId
+					});
+				}
+				const { reason, ...fields } = patch;
+				const changedKeys = Object.keys(fields).filter(
+					(k) => fields[k as keyof typeof fields] !== undefined
+				);
+				if (current.row.locked) {
+					const onlyUnlock =
+						changedKeys.length === 1 && changedKeys[0] === 'locked' && fields.locked === false;
+					if (!onlyUnlock)
+						throw new TlonError('ARTIFACT_LOCKED', 'artifact is locked', { artifactId: id });
+				}
+				if (fields.status === 'ACCEPTED') {
+					const pending = await tx
+						.select({ id: expansionCandidates.id })
+						.from(expansionCandidates)
+						.innerJoin(expansions, eq(expansions.id, expansionCandidates.expansionId))
+						.where(
+							and(
+								eq(expansionCandidates.artifactId, id),
+								eq(expansionCandidates.reviewStatus, 'PENDING'),
+								inArray(expansions.status, ['PENDING', 'GENERATING', 'REVIEW'])
+							)
+						)
+						.limit(1);
+					if (pending.length > 0) {
+						throw new TlonError(
+							'INVALID_STATE',
+							'artifact is a pending expansion candidate; accept it via the expansion',
+							{
+								artifactId: id
+							}
+						);
+					}
+				}
+				const next = {
+					kind: (fields.kind ?? current.row.kind) as ArtifactKind,
+					structured: fields.structured ?? current.row.structured
+				};
+				const structured =
+					fields.kind !== undefined || fields.structured !== undefined
+						? guardValidation(() =>
+								parseStructured(
+									project.domain as 'NARRATIVE' | 'GENERIC',
+									next.kind,
+									next.structured
+								)
+							)
+						: current.row.structured;
+				const updated = await appendRevision(
+					ctx,
+					tx,
+					principal,
+					current,
+					{
+						kind: next.kind,
+						title: fields.title ?? current.row.title,
+						body: fields.body ?? current.row.body,
+						structured,
+						status: fields.status ?? current.row.status,
+						ownerScope: fields.ownerScope ?? current.row.ownerScope,
+						locked: fields.locked ?? current.row.locked,
+						pinned: fields.pinned ?? current.row.pinned
+					},
+					reason ?? null
+				);
+				await audit(ctx, tx, principal, projectId, 'artifact.update', id, {
+					fields: changedKeys,
+					version: updated.version
+				});
+				return toArtifact(updated.row, updated.version);
+			});
+		},
+
+		async listRevisions(
+			principal: Principal,
+			projectId: string,
+			id: string
+		): Promise<RevisionList> {
+			await authorize(db, principal, projectId, 'read');
+			asUuid(id, 'ARTIFACT_NOT_FOUND');
+			await getArtifactRow(db, principal, projectId, id);
+			const rows = await db
+				.select()
+				.from(artifactRevisions)
+				.where(eq(artifactRevisions.artifactId, id))
+				.orderBy(desc(artifactRevisions.version), asc(artifactRevisions.id));
+			const items: ArtifactRevision[] = rows.map(toRevision);
+			return { items };
+		}
+	};
+}

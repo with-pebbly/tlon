@@ -1,0 +1,35 @@
+{
+	"$schema": "./node_modules/oxlint/configuration_schema.json",
+	"plugins": ["typescript", "unicorn", "import", "oxc"],
+	"categories": {
+		"correctness": "error",
+		"suspicious": "warn",
+		"perf": "warn"
+	},
+	"env": {
+		"browser": true,
+		"node": true,
+		"es2024": true
+	},
+	"ignorePatterns": [
+		"**/node_modules/**",
+		"**/.svelte-kit/**",
+		"**/build/**",
+		"**/dist/**",
+		"**/.turbo/**",
+		"**/migrations/**"
+	],
+	"rules": {
+		"no-console": ["warn", { "allow": ["warn", "error"] }],
+		"unicorn/prefer-node-protocol": "error",
+		"typescript/consistent-type-imports": "warn",
+		"import/no-unassigned-import": ["warn", { "allow": ["**/*.css"] }],
+		"unicorn/require-module-specifiers": "off"
+	},
+	"overrides": [
+		{
+			"files": ["**/scripts/**", "apps/cli/**"],
+			"rules": { "no-console": "off" }
+		}
+	]
+}

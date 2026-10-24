@@ -1,0 +1,14 @@
+node_modules/
+.turbo/
+.svelte-kit/
+build/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+.pgdata/
+.data/
+.playwright-cli/
+*.log
+.DS_Store

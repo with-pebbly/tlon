@@ -1,0 +1,105 @@
+@import 'tailwindcss';
+
+@theme {
+	--font-sans:
+		ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+	--font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	--color-accent-50: oklch(0.97 0.02 270);
+	--color-accent-100: oklch(0.93 0.04 270);
+	--color-accent-200: oklch(0.87 0.07 270);
+	--color-accent-500: oklch(0.58 0.19 270);
+	--color-accent-600: oklch(0.51 0.2 270);
+	--color-accent-700: oklch(0.45 0.18 270);
+}
+
+@layer base {
+	html,
+	body {
+		height: 100%;
+	}
+	body {
+		@apply bg-zinc-50 font-sans text-[13px] leading-5 text-zinc-800 antialiased;
+	}
+	:focus-visible {
+		@apply outline-2 outline-offset-1 outline-accent-500;
+	}
+}
+
+@layer components {
+	.btn {
+		@apply inline-flex h-7 items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-2.5 text-[13px] font-medium whitespace-nowrap text-zinc-700 shadow-xs transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50;
+	}
+	.btn-primary {
+		@apply border-accent-600 bg-accent-600 text-white hover:bg-accent-700;
+	}
+	.btn-ghost {
+		@apply border-transparent bg-transparent shadow-none hover:bg-zinc-200/70;
+	}
+	.btn-sm {
+		@apply h-6 px-2 text-xs;
+	}
+	.input {
+		@apply h-7 w-full rounded-md border border-zinc-300 bg-white px-2 text-[13px] text-zinc-800 placeholder:text-zinc-400 focus:border-accent-500 focus:outline-none;
+	}
+	textarea.input {
+		@apply h-auto py-1.5 leading-5;
+	}
+	.label {
+		@apply mb-0.5 block text-[11px] font-semibold tracking-wide text-zinc-500 uppercase;
+	}
+	.section-title {
+		@apply text-[11px] font-semibold tracking-wide text-zinc-500 uppercase;
+	}
+	.chip {
+		@apply inline-flex items-center gap-1 rounded border px-1.5 text-[11px] leading-[18px] font-medium;
+	}
+	.panel {
+		@apply rounded-lg border border-zinc-200 bg-white;
+	}
+}
+
+/* Svelte Flow overrides: quiet neutral canvas, accent selection. */
+.svelte-flow {
+	--xy-edge-stroke: var(--color-zinc-400);
+	--xy-edge-stroke-selected: var(--color-accent-600);
+	--xy-edge-label-background-color: var(--color-zinc-50);
+	--xy-edge-label-color: var(--color-zinc-600);
+	--xy-background-pattern-dots-color-default: var(--color-zinc-300);
+	--xy-minimap-background-color-default: var(--color-white);
+	--xy-handle-background-color-default: var(--color-zinc-400);
+	--xy-handle-border-color-default: var(--color-white);
+}
+.svelte-flow .svelte-flow__edge-text,
+.svelte-flow .svelte-flow__edge-label {
+	font-size: 11px;
+}
+.svelte-flow .svelte-flow__edge.tlon-edge-collapsed path.svelte-flow__edge-path {
+	stroke-dasharray: 6 4;
+	stroke: var(--color-zinc-400);
+}
+.svelte-flow .svelte-flow__edge.tlon-edge-preview path.svelte-flow__edge-path {
+	stroke-dasharray: 2 4;
+	stroke: var(--color-accent-500);
+	stroke-linecap: round;
+}
+.svelte-flow .svelte-flow__edge.tlon-edge-proposed path.svelte-flow__edge-path {
+	stroke-dasharray: 5 3;
+}
+.svelte-flow .svelte-flow__edge.tlon-edge-rejected path.svelte-flow__edge-path {
+	stroke: var(--color-zinc-300);
+	stroke-dasharray: 2 3;
+}
+.svelte-flow .svelte-flow__edge.tlon-edge-tension path.svelte-flow__edge-path {
+	stroke: var(--color-amber-500);
+}
+.svelte-flow .svelte-flow__edge.tlon-edge-highlight path.svelte-flow__edge-path {
+	stroke: var(--color-accent-500);
+	stroke-width: 2.5;
+}
+.svelte-flow .svelte-flow__edge.selected path.svelte-flow__edge-path {
+	stroke: var(--color-accent-600);
+	stroke-width: 2.5;
+}
+.svelte-flow .svelte-flow__node {
+	border-radius: 8px;
+}

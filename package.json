@@ -1,0 +1,33 @@
+{
+	"name": "tlon",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "turbo run dev --filter=@tlon/api --filter=@tlon/web",
+		"build": "turbo run build",
+		"check": "turbo run check",
+		"test": "turbo run test",
+		"lint": "oxlint",
+		"lint:fix": "oxlint --fix",
+		"format": "oxfmt .",
+		"format:check": "oxfmt --check .",
+		"db:start": "sh scripts/pg-local.sh start",
+		"db:stop": "sh scripts/pg-local.sh stop",
+		"db:generate": "pnpm --filter @tlon/store db:generate",
+		"db:migrate": "node --env-file-if-exists=.env apps/cli/src/main.ts migrate",
+		"db:seed": "node --env-file-if-exists=.env apps/cli/src/main.ts seed",
+		"tlon": "node --env-file-if-exists=.env apps/cli/src/main.ts"
+	},
+	"devDependencies": {
+		"@types/node": "^24.0.0",
+		"oxfmt": "^0.74.0",
+		"oxlint": "^1.89.0",
+		"turbo": "^2.11.10",
+		"typescript": "^6.0.3"
+	},
+	"engines": {
+		"node": ">=24"
+	},
+	"packageManager": "pnpm@11.13.0"
+}
