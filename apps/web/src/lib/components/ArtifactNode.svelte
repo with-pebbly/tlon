@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { toneRing } from '$lib/continuity';
 	import { NODE_HEIGHT, NODE_WIDTH } from '$lib/graph/layout';
 	import type { ArtifactFlowNode } from '$lib/graph/types';
 	import { CATEGORY_CARD, CATEGORY_LABEL, STATUS_TEXT } from '$lib/ui';
@@ -18,7 +19,7 @@
 		'flex flex-col gap-1 overflow-hidden rounded-lg border px-2.5 py-2 shadow-xs transition-shadow',
 		CATEGORY_CARD[data.category],
 		selected && 'shadow-md outline-2 outline-offset-2 outline-accent-500',
-		data.highlighted && 'ring-4 ring-amber-300'
+		data.highlighted ? 'ring-4 ring-amber-300' : toneRing(data.issue, selected)
 	]}
 	style:width="{NODE_WIDTH}px"
 	style:height="{NODE_HEIGHT}px"
@@ -34,6 +35,12 @@
 		{:else if data.bridgeDepth !== null}
 			<span class="text-accent-600" title="Accepted bridge at expansion depth {data.bridgeDepth}"
 				>◆ d{data.bridgeDepth}</span
+			>
+		{/if}
+		{#if data.stale}
+			<span
+				class="chip border-amber-300 bg-amber-50 text-amber-800"
+				title="Stale bridge: an anchor changed after acceptance">stale</span
 			>
 		{/if}
 		<span class="ml-auto flex items-center gap-1 text-zinc-400">

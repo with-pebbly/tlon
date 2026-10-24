@@ -1,5 +1,19 @@
+<script module lang="ts">
+	import { ValidationIssue } from '@tlon/contracts';
+
+	/** `details.issues` of a 409 CONTINUITY_VIOLATION from accept. */
+	const Blockers = ValidationIssue.pick({
+		key: true,
+		kind: true,
+		severity: true,
+		artifactIds: true,
+		stateKey: true
+	}).array();
+</script>
+
 <script lang="ts">
-	import { api } from '$lib/api';
+	import { api, isApiError } from '$lib/api';
+	import { ISSUE_KIND_LABEL, issueTone, TONE_GLYPH, TONE_TEXT } from '$lib/continuity';
 	import { getWorkspace } from '$lib/state/context';
 	import { toasts } from '$lib/state/toasts.svelte';
 	import { isOpen } from '$lib/state/workspace.svelte';
@@ -13,6 +27,7 @@
 
 	import CandidateForm from './CandidateForm.svelte';
 	import ExpandableRelation from './ExpandableRelation.svelte';
+	import IssueRow from './IssueRow.svelte';
 	import KindBadge from './KindBadge.svelte';
 	import RelationTypeInput from './RelationTypeInput.svelte';
 
@@ -28,6 +43,12 @@
 	let leftType = $state(DEFAULT_CHILD_RELATION_TYPE);
 	let rightType = $state(DEFAULT_CHILD_RELATION_TYPE);
 	let busy = $state<string | null>(null);
+	/** Blockers the server refused an accept for, until accepted anyway or dismissed. */
+	let violation = $state.raw<{
+		candidateId: string;
+		issues: ReturnType<typeof Blockers.parse>;
+	} | null>(null);
+	let acknowledgement = $state('');
 
 	// Re-fetch on selection change and after every graph refresh (mutations bump `revision`).
 	$effect(() => {
@@ -88,14 +109,33 @@
 		}
 	}
 
-	function accept(candidateId: string) {
-		return run(`accept:${candidateId}`, () =>
-			ws.accept(expansionId, {
+	/**
+	 * Accept a candidate. A 409 CONTINUITY_VIOLATION lists the blockers it would add; a
+	 * human may then resend with `acknowledgeIssues` (the reason is recorded server-side).
+	 */
+	async function accept(candidateId: string, acknowledgeIssues?: string) {
+		busy = `accept:${candidateId}`;
+		try {
+			await ws.accept(expansionId, {
 				candidateId,
 				leftRelationType: leftType,
-				rightRelationType: rightType
-			})
-		);
+				rightRelationType: rightType,
+				...(acknowledgeIssues ? { acknowledgeIssues } : {})
+			});
+			violation = null;
+			acknowledgement = '';
+		} catch (error) {
+			const details =
+				isApiError(error) && error.code === 'CONTINUITY_VIOLATION' ? error.details : null;
+			const blockers =
+				details && typeof details === 'object' && 'issues' in details
+					? Blockers.safeParse(details.issues)
+					: null;
+			if (blockers?.success) violation = { candidateId, issues: blockers.data };
+			else toasts.error(error);
+		} finally {
+			busy = null;
+		}
 	}
 </script>
 
@@ -132,6 +172,13 @@
 					>depth {expansion.depth}</span
 				>
 				<span class="text-[11px] font-medium text-zinc-600">{expansion.status}</span>
+				{#if expansion.staleSides.length > 0}
+					<span
+						class="chip border-amber-300 bg-amber-50 text-amber-800"
+						title="An anchor's head revision moved past the pinned one after acceptance"
+						>stale: {expansion.staleSides.join('/')}</span
+					>
+				{/if}
 				<span class="ml-auto font-mono text-[11px] text-zinc-400" title={expansion.id}
 					>{shortId(expansion.id)}</span
 				>
@@ -190,6 +237,16 @@
 				class="flex flex-col gap-1.5 rounded-lg border border-accent-200 bg-accent-50/50 p-2.5"
 			>
 				<h3 class="section-title text-accent-700">Accepted bridge</h3>
+				{#if expansion.staleSides.length > 0}
+					<p
+						class="rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-900"
+						role="alert"
+					>
+						Stale: the {expansion.staleSides.join(' and ')} anchor changed after this bridge was accepted
+						(e.g. a composite got a new definition). The bridge is kept as is — review whether it still
+						reconciles the current versions.
+					</p>
+				{/if}
 				{#if expansion.selectedBridgeArtifactId}
 					{@const bridgeId = expansion.selectedBridgeArtifactId}
 					<button
@@ -275,6 +332,24 @@
 							</div>
 						{/if}
 					</dl>
+					{#if candidate.issues.length > 0}
+						<div class="flex flex-col gap-1.5">
+							<div class="text-[11px] font-medium text-zinc-600">
+								If accepted, adds {candidate.issues.length} issue{candidate.issues.length === 1
+									? ''
+									: 's'} to the story path:
+							</div>
+							{#each candidate.issues as issue (issue.key)}
+								<IssueRow {issue} actions={false} />
+							{/each}
+						</div>
+					{:else if candidate.reviewStatus === 'PENDING'}
+						<p class="text-[11px] text-zinc-500">
+							{ws.transitionsByArtifact.has(candidate.artifactId)
+								? 'Adds no continuity issues to the story path.'
+								: 'No state annotation — continuity was not checked.'}
+						</p>
+					{/if}
 					{#if open && candidate.reviewStatus === 'PENDING'}
 						<div class="flex gap-1.5">
 							<button
@@ -291,6 +366,77 @@
 								>Reject candidate</button
 							>
 						</div>
+						{#if violation?.candidateId === candidate.id}
+							{@const blocked = violation}
+							<div
+								class="flex flex-col gap-1.5 rounded-md border border-rose-300 bg-rose-50 p-2 text-xs text-rose-900"
+								role="alert"
+							>
+								<div class="font-semibold">
+									CONTINUITY_VIOLATION — accepting adds {blocked.issues.length} blocker{blocked
+										.issues.length === 1
+										? ''
+										: 's'}:
+								</div>
+								<ul class="flex flex-col gap-1">
+									{#each blocked.issues as issue (issue.key)}
+										{@const tone = issueTone(issue)}
+										<li class="flex flex-col">
+											<span
+												><span class={['font-medium', TONE_TEXT[tone]]}
+													>{TONE_GLYPH[tone]} {ISSUE_KIND_LABEL[issue.kind]}</span
+												>
+												{#if issue.stateKey}<span class="font-mono text-zinc-700"
+														>· {issue.stateKey}</span
+													>{/if}</span
+											>
+											<span class="text-zinc-700">
+												{ws
+													.inStoryOrder(issue.artifactIds)
+													.map((id) => {
+														const beat = ws.beatIndex.get(id);
+														return `${beat === undefined ? '' : `#${beat} `}${ws.title(id)}`;
+													})
+													.join(' ⇄ ')}
+											</span>
+										</li>
+									{/each}
+								</ul>
+								<form
+									class="flex flex-col gap-1"
+									onsubmit={(event) => {
+										event.preventDefault();
+										if (acknowledgement.trim() !== '') accept(candidate.id, acknowledgement.trim());
+									}}
+								>
+									<label class="label text-rose-800" for="ei-ack-{candidate.id}"
+										>Reason for accepting anyway (recorded in the revision and audit)</label
+									>
+									<textarea
+										id="ei-ack-{candidate.id}"
+										class="input"
+										rows="2"
+										maxlength="1000"
+										required
+										bind:value={acknowledgement}></textarea>
+									<div class="flex gap-1.5">
+										<button
+											class="btn btn-sm border-rose-300 text-rose-800"
+											disabled={busy !== null || acknowledgement.trim() === ''}
+											>{busy === `accept:${candidate.id}` ? 'Accepting…' : 'Accept anyway'}</button
+										>
+										<button
+											type="button"
+											class="btn btn-sm"
+											onclick={() => {
+												violation = null;
+												acknowledgement = '';
+											}}>Keep open</button
+										>
+									</div>
+								</form>
+							</div>
+						{/if}
 					{/if}
 				</article>
 			{:else}

@@ -2,8 +2,11 @@
 	import { getWorkspace } from '$lib/state/context';
 	import { isOpen } from '$lib/state/workspace.svelte';
 
+	import AggregatedEdgeInspector from './AggregatedEdgeInspector.svelte';
 	import ArtifactInspector from './ArtifactInspector.svelte';
+	import CompositeInspector from './CompositeInspector.svelte';
 	import ExpansionInspector from './ExpansionInspector.svelte';
+	import IssuesPanel from './IssuesPanel.svelte';
 	import Legend from './Legend.svelte';
 	import RelationInspector from './RelationInspector.svelte';
 	import TensionsPanel from './TensionsPanel.svelte';
@@ -17,11 +20,15 @@
 	const relation = $derived(
 		selection?.type === 'relation' ? ws.relationsById.get(selection.id) : undefined
 	);
+	const aggregate = $derived(
+		selection?.type === 'aggregate' ? ws.aggregatedById.get(selection.id) : undefined
+	);
 	const counts = $derived({
 		artifacts: ws.artifacts.filter((a) => a.status !== 'REJECTED').length,
 		relations: ws.relations.filter((r) => r.status !== 'REJECTED').length,
 		accepted: ws.expansions.filter((e) => e.status === 'ACCEPTED').length,
-		open: ws.expansions.filter(isOpen).length
+		open: ws.expansions.filter(isOpen).length,
+		composites: ws.composites.length
 	});
 </script>
 
@@ -47,12 +54,24 @@
 		}}
 	>
 		{#if selection?.type === 'artifact'}
-			{#if artifact}
+			{#if artifact && ws.compositesById.has(artifact.id)}
+				{#key artifact.id}
+					<CompositeInspector {artifact} />
+				{/key}
+			{:else if artifact}
 				{#key `${artifact.id}:${artifact.headRevisionId}`}
 					<ArtifactInspector {artifact} />
 				{/key}
 			{:else}
 				<p class="text-zinc-500">Artifact not found in this project.</p>
+			{/if}
+		{:else if selection?.type === 'aggregate'}
+			{#if aggregate}
+				<AggregatedEdgeInspector edge={aggregate} />
+			{:else}
+				<p class="text-zinc-500">
+					This aggregated edge is no longer drawn (a composite was opened or filtered).
+				</p>
 			{/if}
 		{:else if selection?.type === 'relation'}
 			{#if relation}
@@ -71,7 +90,7 @@
 		{:else}
 			<div class="flex flex-col gap-5">
 				<dl class="grid grid-cols-2 gap-2">
-					{#each [['Artifacts', counts.artifacts], ['Relations', counts.relations], ['Accepted bridges', counts.accepted], ['Open expansions', counts.open]] as [label, value] (label)}
+					{#each [['Artifacts', counts.artifacts], ['Relations', counts.relations], ['Accepted bridges', counts.accepted], ['Open expansions', counts.open], ['Composites', counts.composites]] as [label, value] (label)}
 						<div class="rounded-lg border border-zinc-200 px-2.5 py-1.5">
 							<dt class="text-[11px] text-zinc-500">{label}</dt>
 							<dd class="text-lg font-semibold text-zinc-900">{value}</dd>
@@ -80,8 +99,10 @@
 				</dl>
 				<p class="text-xs text-zinc-500">
 					Select a node, edge or outline row to inspect it. Drag from a node's right handle onto
-					another node to create a relation. Esc clears the selection.
+					another node to create a relation. Shift-click or shift-drag to select several, then
+					“Compose selection”; double-click a composite to drill in. Esc clears the selection.
 				</p>
+				<IssuesPanel />
 				<TensionsPanel />
 				<section>
 					<h3 class="section-title mb-2">Legend</h3>

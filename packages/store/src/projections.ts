@@ -37,6 +37,7 @@ import {
 } from '@tlon/core';
 import { and, asc, desc, eq, exists, gt, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
 
+import { loadCompositeSummaries } from './composites.ts';
 import type { Db } from './db.ts';
 import { chunk, type Ctx } from './internal.ts';
 import {
@@ -617,7 +618,9 @@ export async function loadValidationGraph(
 	q: Db,
 	principal: Principal,
 	projectId: string
-): Promise<Pick<ProjectGraph, 'project' | 'artifacts' | 'relations' | 'expansions'>> {
+): Promise<
+	Pick<ProjectGraph, 'project' | 'artifacts' | 'relations' | 'expansions' | 'composites'>
+> {
 	const [[project], artifactList, relationList, expansionList] = await Promise.all([
 		q.select().from(projects).where(eq(projects.id, projectId)),
 		selectArtifacts(ctx, q, principal, projectId),
@@ -632,7 +635,9 @@ export async function loadValidationGraph(
 		relations: relationList,
 		expansions: expansionList.filter(
 			(e) => visible.has(e.leftArtifactId) && visible.has(e.rightArtifactId)
-		)
+		),
+		// Bridges anchored on composites resolve to their boundary in story order.
+		composites: await loadCompositeSummaries(q, projectId, artifactList, relationList)
 	};
 }
 

@@ -8,7 +8,14 @@ import {
 	type Artifact,
 	type ArtifactListQuery,
 	type ArtifactPage,
+	type CompositeRevisionList,
+	type CompositeView,
 	type CreateArtifactInput,
+	type DismissIssueInput,
+	type IssueList,
+	type PutTransitionInput,
+	type TransitionAnnotation,
+	type CreateCompositeInput,
 	type CreateExpansionInput,
 	type CreateProjectInput,
 	type CreateRelationInput,
@@ -23,6 +30,7 @@ import {
 	type RejectExpansionInput,
 	type Relation,
 	type RevisionList,
+	type ReviseCompositeInput,
 	type SubmitCandidateInput,
 	type UpdateArtifactInput,
 	type UpdateRelationInput,
@@ -66,7 +74,7 @@ export class ApiError extends Error {
 export const isApiError = (value: unknown): value is ApiError => value instanceof ApiError;
 
 type RequestOptions = {
-	method?: 'GET' | 'POST' | 'PATCH';
+	method?: 'GET' | 'POST' | 'PATCH' | 'PUT';
 	body?: unknown;
 	headers?: Record<string, string>;
 	/** Only string/number/boolean values are sent; anything else is omitted. */
@@ -155,6 +163,22 @@ export const api = {
 		}),
 	listRevisions: (projectId: string, artifactId: string) =>
 		request<RevisionList>(`${p(projectId)}/artifacts/${id(artifactId)}/revisions`),
+	/**
+	 * Appends a state annotation for the artifact's head revision (`artifactRevisionId`);
+	 * an older revision fails with STALE_REVISION. Never creates an artifact revision.
+	 */
+	putTransition: (projectId: string, artifactId: string, input: PutTransitionInput) =>
+		request<TransitionAnnotation>(`${p(projectId)}/artifacts/${id(artifactId)}/transition`, {
+			method: 'PUT',
+			body: input
+		}),
+
+	// ── Continuity validation ───────────────────────────────────────────────────
+
+	listIssues: (projectId: string) => request<IssueList>(`${p(projectId)}/issues`),
+	/** Records a dismissal by issue key; returns the recomputed list. */
+	dismissIssue: (projectId: string, input: DismissIssueInput) =>
+		request<IssueList>(`${p(projectId)}/issues/dismiss`, { method: 'POST', body: input }),
 
 	createRelation: (projectId: string, input: CreateRelationInput) =>
 		request<Relation>(`${p(projectId)}/relations`, { method: 'POST', body: input }),
@@ -247,5 +271,29 @@ export const api = {
 		}),
 
 	listOwnAudit: (projectId: string, query: { cursor?: string; limit?: number } = {}) =>
-		request<AuditPage>(`${p(projectId)}/audit/own`, { query })
+		request<AuditPage>(`${p(projectId)}/audit/own`, { query }),
+
+	// ── Composite artifacts ─────────────────────────────────────────────────────
+
+	createComposite: (projectId: string, input: CreateCompositeInput) =>
+		request<CompositeView>(`${p(projectId)}/composites`, { method: 'POST', body: input }),
+	/** `depth` = how many nested membership levels the server opens (0 = this one only). */
+	getComposite: (projectId: string, compositeId: string, depth = 1) =>
+		request<CompositeView>(`${p(projectId)}/composites/${id(compositeId)}`, {
+			query: { depth }
+		}),
+	/** Fails with STALE_DEFINITION (409, details.currentVersion) on a version mismatch. */
+	reviseComposite: (projectId: string, compositeId: string, input: ReviseCompositeInput) =>
+		request<CompositeView>(`${p(projectId)}/composites/${id(compositeId)}/revisions`, {
+			method: 'POST',
+			body: input
+		}),
+	listCompositeRevisions: (projectId: string, compositeId: string) =>
+		request<CompositeRevisionList>(`${p(projectId)}/composites/${id(compositeId)}/revisions`),
+	/** Status ARCHIVED via a normal revision; members and relations stay untouched. */
+	archiveComposite: (projectId: string, compositeId: string, reason?: string) =>
+		request<Artifact>(`${p(projectId)}/composites/${id(compositeId)}/archive`, {
+			method: 'POST',
+			body: reason ? { reason } : {}
+		})
 };

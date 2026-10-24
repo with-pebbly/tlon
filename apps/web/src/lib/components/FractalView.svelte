@@ -13,6 +13,13 @@
 	/** Expansions opened on an ordered artifact pair rather than a relation. */
 	const pairExpansions = $derived(ws.expansions.filter((e) => e.targetRelationId === null));
 	const maxDepth = $derived(ws.expansions.reduce((max, e) => Math.max(max, e.depth), 0));
+	/** Other composites containing the current drill-in level (it may have several parents). */
+	const otherParents = $derived.by(() => {
+		const current = ws.fractalIn;
+		if (current === null) return [];
+		const onPath = ws.breadcrumbs.at(-2);
+		return (ws.parentsOf.get(current) ?? []).filter((id) => id !== onPath);
+	});
 </script>
 
 <!-- The pyramid with titled cells; the indented hierarchy (with Expand actions) on demand. -->
@@ -21,12 +28,53 @@
 		<SvelteFlowProvider>
 			<GraphCanvas variant="fractal" />
 		</SvelteFlowProvider>
-		{#if !treeOpen}
-			<button
-				class="btn btn-sm absolute top-2 left-2 z-10 bg-white shadow-sm"
-				onclick={() => (treeOpen = true)}>▸ Expansion hierarchy</button
-			>
-		{/if}
+		<div
+			class="absolute top-2 left-2 z-10 flex max-w-[calc(100%-18rem)] flex-col items-start gap-1.5"
+		>
+			{#if ws.fractalIn !== null}
+				<nav
+					class="panel flex flex-wrap items-center gap-1 px-2 py-1 text-xs shadow-sm"
+					aria-label="Composite drill-in"
+				>
+					<button
+						class="text-zinc-500 hover:text-accent-700 hover:underline"
+						onclick={() => ws.exitTo(null)}>{ws.project?.name ?? 'Project'}</button
+					>
+					{#each ws.breadcrumbs as id, index (id)}
+						<span class="text-zinc-300">›</span>
+						{#if index === ws.breadcrumbs.length - 1}
+							<button
+								class="font-semibold text-zinc-900 hover:underline"
+								title="Inspect this composite"
+								onclick={() => ws.select({ type: 'artifact', id })}>◈ {ws.title(id)}</button
+							>
+						{:else}
+							<button
+								class="text-zinc-600 hover:text-accent-700 hover:underline"
+								onclick={() => ws.exitTo(id)}>◈ {ws.title(id)}</button
+							>
+						{/if}
+					{/each}
+					<span class="ml-1 text-[11px] text-zinc-400">Esc: up one level</span>
+				</nav>
+				{#if otherParents.length > 0}
+					<div class="panel flex flex-wrap items-center gap-1 px-2 py-0.5 text-[11px] shadow-sm">
+						<span class="text-zinc-400">also in</span>
+						{#each otherParents as id (id)}
+							<button
+								class="text-zinc-600 hover:text-accent-700 hover:underline"
+								onclick={() => ws.enterComposite(id)}>◈ {ws.title(id)}</button
+							>
+						{/each}
+					</div>
+				{/if}
+			{/if}
+			{#if !treeOpen}
+				<button class="btn btn-sm bg-white shadow-sm" onclick={() => (treeOpen = true)}
+					>▸ Expansion hierarchy</button
+				>
+			{/if}
+		</div>
 	</div>
 	{#if treeOpen}
 		<aside

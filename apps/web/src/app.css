@@ -110,6 +110,31 @@
 .svelte-flow .svelte-flow__edge.tlon-edge-tension path.svelte-flow__edge-path {
 	stroke: var(--color-amber-500);
 }
+/* Continuity overlay: blockers red, warnings amber, tensions keep the creative amber
+   (dashed) — never red. Highlight and selection rules below still win. */
+.svelte-flow .svelte-flow__edge.tlon-issue-blocker path.svelte-flow__edge-path {
+	stroke: var(--color-rose-500);
+	stroke-width: 2;
+	stroke-dasharray: none;
+}
+.svelte-flow .svelte-flow__edge.tlon-issue-warning path.svelte-flow__edge-path {
+	stroke: var(--color-amber-500);
+	stroke-width: 2;
+	stroke-dasharray: none;
+}
+.svelte-flow .svelte-flow__edge.tlon-issue-creative path.svelte-flow__edge-path {
+	stroke: var(--color-amber-500);
+	stroke-width: 1.5;
+	stroke-dasharray: 4 3;
+}
+/* Edge labels are portaled out of the edge group; they select their edge on click. */
+.svelte-flow .tlon-edge-label {
+	cursor: pointer;
+}
+.svelte-flow .tlon-edge-label:hover {
+	color: var(--color-accent-700);
+	text-decoration: underline;
+}
 .svelte-flow .svelte-flow__edge.tlon-edge-highlight path.svelte-flow__edge-path {
 	stroke: var(--color-accent-500);
 	stroke-width: 2.5;
@@ -197,4 +222,49 @@
 	max-width: 16rem;
 	box-shadow: 0 1px 3px rgb(0 0 0 / 0.12);
 	transform: translateX(-50%);
+}
+
+/* Composites: collapsed cards look stacked; open frames sit behind members and let the
+   pane (clicks, shift-drag selection box) through everywhere except the title tab. */
+.tlon-composite-card {
+	box-shadow:
+		3px 3px 0 -1px var(--color-white),
+		3px 3px 0 0 var(--color-zinc-500),
+		6px 6px 0 -1px var(--color-white),
+		6px 6px 0 0 var(--color-zinc-300);
+}
+.svelte-flow .svelte-flow__node-frame {
+	pointer-events: none;
+}
+.svelte-flow .svelte-flow__node-frame .tlon-frame-tab,
+.svelte-flow .svelte-flow__node-frame .svelte-flow__handle {
+	pointer-events: auto;
+}
+.svelte-flow__node-cell .tlon-open-btn {
+	opacity: 0;
+	transition: opacity 120ms;
+}
+.svelte-flow__node-cell:hover .tlon-open-btn,
+.svelte-flow__node-cell.selected .tlon-open-btn {
+	opacity: 1;
+}
+/* Aggregated edges are virtual: dashed, muted, never styled like a real relation. */
+.svelte-flow .svelte-flow__edge.tlon-edge-aggregated path.svelte-flow__edge-path {
+	stroke: var(--color-zinc-500);
+	stroke-width: 1.5;
+	stroke-dasharray: 8 5;
+}
+/* Aggregated edge standing for hidden relations between issue beats: keeps its dashes. */
+.svelte-flow
+	.svelte-flow__edge.tlon-edge-aggregated.tlon-issue-blocker
+	path.svelte-flow__edge-path {
+	stroke: var(--color-rose-500);
+}
+.svelte-flow
+	.svelte-flow__edge.tlon-edge-aggregated:is(.tlon-issue-warning, .tlon-issue-creative)
+	path.svelte-flow__edge-path {
+	stroke: var(--color-amber-500);
+}
+.svelte-flow .svelte-flow__edge.tlon-edge-aggregated.selected path.svelte-flow__edge-path {
+	stroke: var(--color-accent-600);
 }

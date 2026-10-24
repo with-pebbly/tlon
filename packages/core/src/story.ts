@@ -15,15 +15,20 @@ export type StoryBeat = {
  * The scenario as one reading order: authored beats and accepted bridges sorted by
  * their position on the pyramid's base axis (in-order traversal of every expansion
  * tree), so each bridge lands between the two beats it reconciles. Rejected
- * artifacts, open candidates and disclosure notes are left out.
+ * artifacts, open candidates, disclosure notes and composites are left out.
  */
 export function storyBeats(graph: GraphLike): StoryBeat[] {
-	const disclosed = new Set(
-		graph.artifacts.filter((a) => a.ownerScope === 'C_SHARED' && a.kind === 'NOTE').map((a) => a.id)
+	// Disclosure notes and composites are structure around the story, not beats in it.
+	const excluded = new Set(
+		graph.artifacts
+			.filter(
+				(a) => (a.ownerScope === 'C_SHARED' && a.kind === 'NOTE') || a.composition === 'COMPOSITE'
+			)
+			.map((a) => a.id)
 	);
 	const byId = new Map(graph.artifacts.map((a) => [a.id, a]));
 	return layoutPyramid(graph)
-		.nodes.filter((n) => n.role !== 'candidate' && !disclosed.has(n.artifactId))
+		.nodes.filter((n) => n.role !== 'candidate' && !excluded.has(n.artifactId))
 		.toSorted((a, b) => a.x - b.x || a.y - b.y)
 		.flatMap((n) => {
 			const artifact = byId.get(n.artifactId);

@@ -2,6 +2,13 @@ import { goto } from '$app/navigation';
 import { resolve } from '$app/paths';
 import { page } from '$app/state';
 import { api, ApiError, isApiError } from '$lib/api';
+import { EMPTY_TRANSITION, issueTone, pairKey, TONE_RANK, type IssueTone } from '$lib/continuity';
+import {
+	loadOpenComposites,
+	nestingLevels,
+	parentIndex,
+	saveOpenComposites
+} from '$lib/graph/composites';
 import { loadLayoutChoice, saveLayoutChoice, type GraphLayout } from '$lib/graph/positions';
 import {
 	LOCAL_HUMAN,
@@ -11,13 +18,17 @@ import {
 	type Artifact,
 	type ArtifactKind,
 	type ArtifactStatus,
+	type CompositeSummary,
+	type CompositeView,
 	type CreateArtifactInput,
+	type CreateCompositeInput,
 	type CreateRelationInput,
 	type Expansion,
 	type ExpansionCandidate,
 	type ExpansionDetail,
 	type ProjectGraph,
 	type Relation,
+	type ReviseCompositeInput,
 	type SubmitCandidateInput,
 	type UpdateArtifactInput,
 	type UpdateRelationInput,
@@ -26,12 +37,29 @@ import {
 	type Disclosure,
 	type Grant,
 	type IssuedToken,
-	type ReviewDisclosureInput
+	type ReviewDisclosureInput,
+	type DismissIssueInput,
+	type IssueList,
+	type TransitionInput,
+	type ValidationIssue
 } from '@tlon/contracts';
-import { buildFractalTree, buildTimeline, detectTensions } from '@tlon/core';
+import {
+	buildFractalTree,
+	buildTimeline,
+	collapseComposites,
+	detectTensions,
+	membershipIndex,
+	transitiveMembers,
+	validateContinuity,
+	type AggregatedEdge
+} from '@tlon/core';
 import { SvelteSet } from 'svelte/reactivity';
 
-export type SelectionType = 'artifact' | 'relation' | 'expansion';
+/** Highlight label of the Issues panel's "unannotated beats" link (toggles it). */
+export const UNANNOTATED_LABEL = 'unannotated beats';
+
+/** 'aggregate' = a virtual `agg:<from>:<to>` edge standing in for hidden relations. */
+export type SelectionType = 'artifact' | 'relation' | 'expansion' | 'aggregate';
 export type Selection = { type: SelectionType; id: string } | null;
 export type ViewName = 'graph' | 'fractal' | 'timeline';
 
@@ -39,7 +67,8 @@ export const VIEWS: readonly ViewName[] = ['graph', 'fractal', 'timeline'];
 const SELECTION_TYPE: Record<string, SelectionType> = {
 	artifact: 'artifact',
 	relation: 'relation',
-	expansion: 'expansion'
+	expansion: 'expansion',
+	aggregate: 'aggregate'
 };
 
 /** Parses the `sel=<type>:<id>` URL parameter. */
@@ -60,6 +89,8 @@ export class Filters {
 	statuses = new SvelteSet<ArtifactStatus>();
 	query = $state('');
 	showRejected = $state(false);
+	/** ARCHIVED artifacts (retired composites) are hidden unless this is on. */
+	showArchived = $state(false);
 	showCandidates = $state(true);
 	showCollapsedEdges = $state(false);
 
@@ -81,6 +112,26 @@ type CollapsedView = {
 	expansionIds: Set<string>;
 };
 
+/**
+ * What a canvas draws after filters, Fractal drill-in scope and composite collapse
+ * (`collapseComposites`). Open composites stay in `artifacts` (relations may end on
+ * them) but are drawn as frames, not cards.
+ */
+export type CanvasModel = {
+	artifacts: Artifact[];
+	relations: Relation[];
+	expansions: Expansion[];
+	/** Composites inside the drawn scope (head definitions). */
+	composites: CompositeSummary[];
+	/** Hidden member → the collapsed composite standing in for it. */
+	representative: ReadonlyMap<string, string>;
+	aggregatedEdges: AggregatedEdge[];
+	/** Open composites with at least one drawn member: rendered as frames. */
+	frames: CompositeSummary[];
+	/** Ids drawn as cards/cells (everything in `artifacts` except frames). */
+	nodeIds: Set<string>;
+};
+
 export class Workspace {
 	readonly projectId: string;
 
@@ -95,13 +146,28 @@ export class Workspace {
 	filters = new Filters();
 	/** Accepted expansion IDs whose produced subtree is hidden (UI only, never persisted). */
 	collapsed = new SvelteSet<string>();
-	/** Artifacts highlighted by "Show provenance". */
-	highlight = $state.raw<{ relationId: string; artifactIds: Set<string> } | null>(null);
+	/**
+	 * Artifacts highlighted on canvases: "Show provenance" of a relation, or a list from the
+	 * Issues panel (unannotated beats, beats of an issue). `label` names it in the banner.
+	 */
+	highlight = $state.raw<{
+		relationId: string | null;
+		artifactIds: Set<string>;
+		label: string;
+	} | null>(null);
 	/** Bumped to ask the graph canvas to center an artifact. */
 	focusRequest = $state.raw<{ artifactId: string; at: number } | null>(null);
 	newArtifactOpen = $state(false);
 	/** Graph view layout, remembered per project in localStorage. */
 	graphLayout: GraphLayout;
+	/** Composites drawn open (frame around members); UI only, per project in localStorage. */
+	openComposites: SvelteSet<string>;
+	/** Canvas multi-selection (shift-click / shift-drag box) feeding "Compose selection". */
+	multi = new SvelteSet<string>();
+	/** Member ids of the open Compose drawer; null = closed. */
+	composeMemberIds = $state.raw<string[] | null>(null);
+	/** Fractal drill-in path as navigated (outermost first); deep links fall back to parents. */
+	#trail = $state.raw<string[]>([]);
 
 	/** Artifact Gateway admin data (HUMAN only); loaded separately from the graph. */
 	agents = $state.raw<AgentPrincipal[]>([]);
@@ -112,12 +178,21 @@ export class Workspace {
 	/** Open gateway modal: agent admin (+ grants) or the disclosure review queue. */
 	gatewayPanel = $state<'agents' | 'disclosures' | null>(null);
 
+	/** Continuity issues of the committed path (server-computed, dismissals merged). */
+	issueList = $state.raw<IssueList | null>(null);
+	issuesError = $state.raw<ApiError | null>(null);
+	/** Artifact inspector tab, kept across selections so "open State" sticks. */
+	artifactTab = $state<'details' | 'state'>('details');
+	/** Open "Compare neighbours" view: the centre beat and the state key to highlight. */
+	compare = $state.raw<{ artifactId: string; stateKey: string | null } | null>(null);
+
 	/** Idempotency keys for accept requests not yet confirmed by the server. */
 	#acceptKeys = new Map<string, string>();
 
 	constructor(projectId: string) {
 		this.projectId = projectId;
 		this.graphLayout = $state(loadLayoutChoice(projectId));
+		this.openComposites = new SvelteSet(loadOpenComposites(projectId));
 	}
 
 	// ── URL-backed view and selection ──────────────────────────────────────────
@@ -151,9 +226,70 @@ export class Workspace {
 		return this.#navigate((params) => params.set('view', view), false);
 	}
 
+	/** Centers an artifact; one hidden behind collapsed composites is revealed first. */
 	focusArtifact(artifactId: string) {
+		// Each pass opens the outermost collapsed composite hiding it; nesting is bounded.
+		for (let pass = 0; pass < 32; pass++) {
+			const representative = this.canvas.representative.get(artifactId);
+			if (representative === undefined) break;
+			this.openComposites.add(representative);
+		}
+		saveOpenComposites(this.projectId, this.openComposites);
 		this.focusRequest = { artifactId, at: Date.now() };
 		return this.select({ type: 'artifact', id: artifactId });
+	}
+
+	// ── Fractal drill-in (`?in=<compositeId>`) ──────────────────────────────────
+
+	fractalIn = $derived.by<string | null>(() => {
+		const raw = page.url.searchParams.get('in');
+		return raw !== null && this.compositesById.has(raw) ? raw : null;
+	});
+
+	/** Drill-in path ending at `fractalIn`: the navigated trail, else the first-parent chain. */
+	breadcrumbs = $derived.by<string[]>(() => {
+		const current = this.fractalIn;
+		if (current === null) return [];
+		const at = this.#trail.lastIndexOf(current);
+		if (at >= 0) return this.#trail.slice(0, at + 1);
+		const chain = [current];
+		let cursor = current;
+		for (;;) {
+			const parent = (this.parentsOf.get(cursor) ?? []).find(
+				(id) => !chain.includes(id) && this.compositesById.has(id)
+			);
+			if (parent === undefined) break;
+			chain.unshift(parent);
+			cursor = parent;
+		}
+		return chain;
+	});
+
+	/** Double-click on a composite: show only its transitive members in the Fractal view. */
+	enterComposite(compositeId: string) {
+		const crumbs = this.view === 'fractal' ? this.breadcrumbs : [];
+		const parent = crumbs.at(-1);
+		const nested =
+			parent !== undefined &&
+			(this.compositesById.get(parent)?.memberArtifactIds.includes(compositeId) ?? false);
+		this.#trail = nested ? [...crumbs, compositeId] : [compositeId];
+		return this.#navigate((params) => {
+			params.set('view', 'fractal');
+			params.set('in', compositeId);
+		}, false);
+	}
+
+	/** Breadcrumb target: a composite on the current path, or null for the whole project. */
+	exitTo(compositeId: string | null) {
+		return this.#navigate((params) => {
+			if (compositeId === null) params.delete('in');
+			else params.set('in', compositeId);
+		}, false);
+	}
+
+	/** Esc in a drilled-in Fractal view: one level up. */
+	exitComposite() {
+		return this.exitTo(this.breadcrumbs.at(-2) ?? null);
 	}
 
 	setGraphLayout(layout: GraphLayout) {
@@ -171,6 +307,23 @@ export class Workspace {
 	artifactsById = $derived(new Map(this.artifacts.map((a) => [a.id, a])));
 	relationsById = $derived(new Map(this.relations.map((r) => [r.id, r])));
 	expansionsById = $derived(new Map(this.expansions.map((e) => [e.id, e])));
+
+	/** Head definitions of visible composites (archived ones included; filters decide). */
+	composites = $derived(this.graph?.composites ?? []);
+	compositesById = $derived(new Map(this.composites.map((c) => [c.artifactId, c])));
+	membership = $derived(membershipIndex(this.composites));
+	/** Member → composites listing it directly (a member may belong to several). */
+	parentsOf = $derived(parentIndex(this.composites));
+	/** Composite → nesting level (1 = composite of atomic artifacts). */
+	compositeLevels = $derived(nestingLevels(this.membership));
+	/** Accepted bridges whose anchors moved past the pinned revisions. */
+	staleBridgeIds = $derived(
+		new Set(
+			this.expansions
+				.filter((e) => e.status === 'ACCEPTED' && e.staleSides.length > 0)
+				.flatMap((e) => (e.selectedBridgeArtifactId ? [e.selectedBridgeArtifactId] : []))
+		)
+	);
 
 	agentsById = $derived(new Map(this.agents.map((a) => [a.id, a])));
 	pendingDisclosures = $derived(this.disclosures.filter((d) => d.status === 'PENDING'));
@@ -276,6 +429,7 @@ export class Workspace {
 		const query = f.query.trim().toLowerCase();
 		return this.artifacts.filter((a) => {
 			if (a.status === 'REJECTED' && !f.showRejected) return false;
+			if (a.status === 'ARCHIVED' && !f.showArchived) return false;
 			if (this.pendingCandidateIds.has(a.id) && !f.showCandidates) return false;
 			if (this.collapsedView.artifactIds.has(a.id)) return false;
 			if (f.kinds.size > 0 && !f.kinds.has(a.kind)) return false;
@@ -288,13 +442,12 @@ export class Workspace {
 	visibleArtifactIds = $derived(new Set(this.visibleArtifacts.map((a) => a.id)));
 
 	/**
-	 * A relation is a "collapsed parent edge" when an accepted expansion subdivides it.
-	 * Hidden by default; always shown when the user collapsed that expansion's subtree.
+	 * Relations passing the toggles, regardless of endpoint visibility. A relation is a
+	 * "collapsed parent edge" when an accepted expansion subdivides it: hidden by default,
+	 * always shown when the user collapsed that expansion's subtree.
 	 */
-	visibleRelations = $derived(
+	shownRelations = $derived(
 		this.relations.filter((r) => {
-			if (!this.visibleArtifactIds.has(r.fromId) || !this.visibleArtifactIds.has(r.toId))
-				return false;
 			if (r.status === 'REJECTED' && !this.filters.showRejected) return false;
 			if (this.collapsedView.relationIds.has(r.id)) return false;
 			if (r.expandedByExpansionId !== null) {
@@ -304,10 +457,188 @@ export class Workspace {
 		})
 	);
 
+	/** Scope of the drilled-in composite: its transitive members plus their expansions' bridges. */
+	fractalScope = $derived.by<Set<string> | null>(() => {
+		const inId = this.view === 'fractal' ? this.fractalIn : null;
+		if (inId === null) return null;
+		const scope = transitiveMembers(inId, this.membership);
+		// Bridges and candidates between in-scope anchors belong to the scope too; nested
+		// expansions on their child relations are picked up by iterating to a fixpoint.
+		for (let grew = true; grew;) {
+			grew = false;
+			for (const e of this.expansions) {
+				if (!scope.has(e.leftArtifactId) || !scope.has(e.rightArtifactId)) continue;
+				for (const id of [e.selectedBridgeArtifactId, ...e.bridgeArtifactIds]) {
+					if (id !== null && !scope.has(id)) {
+						scope.add(id);
+						grew = true;
+					}
+				}
+			}
+		}
+		return scope;
+	});
+
+	/**
+	 * Canvas pipeline: filters → drill-in scope → `collapseComposites(open set)`. Hidden or
+	 * archived composites drop out of `composites`, so their members surface on their own.
+	 */
+	canvas = $derived.by<CanvasModel>(() => {
+		const scope = this.fractalScope;
+		const inScope = (id: string) => scope === null || scope.has(id);
+		const artifacts = this.visibleArtifacts.filter((a) => inScope(a.id));
+		const ids = new Set(artifacts.map((a) => a.id));
+		const collapsed = collapseComposites(
+			{
+				artifacts,
+				relations: this.shownRelations.filter((r) => inScope(r.fromId) && inScope(r.toId)),
+				expansions: this.expansions.filter(
+					(e) => inScope(e.leftArtifactId) && inScope(e.rightArtifactId)
+				),
+				composites: this.composites.filter((c) => ids.has(c.artifactId))
+			},
+			this.openComposites
+		);
+		const drawn = new Set(collapsed.artifacts.map((a) => a.id));
+		const frames = collapsed.composites.filter(
+			(c) =>
+				drawn.has(c.artifactId) &&
+				this.openComposites.has(c.artifactId) &&
+				c.memberArtifactIds.some((m) => drawn.has(m))
+		);
+		const nodeIds = new Set(drawn);
+		for (const frame of frames) nodeIds.delete(frame.artifactId);
+		return {
+			artifacts: collapsed.artifacts,
+			relations: collapsed.relations.filter((r) => drawn.has(r.fromId) && drawn.has(r.toId)),
+			expansions: collapsed.expansions,
+			composites: collapsed.composites,
+			representative: collapsed.representative,
+			aggregatedEdges: collapsed.aggregatedEdges.filter(
+				(e) => drawn.has(e.fromId) && drawn.has(e.toId)
+			),
+			frames,
+			nodeIds
+		};
+	});
+
+	aggregatedById = $derived(new Map(this.canvas.aggregatedEdges.map((e) => [e.id, e])));
+
+	// ── Continuity validation ───────────────────────────────────────────────────
+
+	/** Latest state annotation per visible artifact. */
+	transitionsByArtifact = $derived(
+		new Map((this.graph?.transitions ?? []).map((t) => [t.artifactId, t]))
+	);
+
+	/**
+	 * The graph as the server validates it (no composites; only expansions between visible
+	 * anchors), so beat numbers and replay order match the issue list.
+	 */
+	validationGraph = $derived.by(() => {
+		const graph = this.graph;
+		if (!graph) return null;
+		return {
+			project: graph.project,
+			artifacts: graph.artifacts,
+			relations: graph.relations,
+			expansions: graph.expansions.filter(
+				(e) => this.artifactsById.has(e.leftArtifactId) && this.artifactsById.has(e.rightArtifactId)
+			)
+		};
+	});
+
+	/** Committed reading path (story order) as `validateContinuity` replays it. */
+	storyPath = $derived(
+		this.validationGraph
+			? validateContinuity(this.validationGraph, this.transitionsByArtifact).path
+			: []
+	);
+	/** Artifact → 1-based beat number on the story path (as `storyBeats` numbers it). */
+	beatIndex = $derived(new Map(this.storyPath.map((id, i) => [id, i + 1])));
+
+	issues = $derived(this.issueList?.items ?? []);
+	openIssues = $derived(this.issues.filter((i) => i.dismissal === null));
+	dismissedIssues = $derived(this.issues.filter((i) => i.dismissal !== null));
+	blockerCount = $derived(this.openIssues.filter((i) => i.severity === 'blocker').length);
+	unannotatedIds = $derived(this.issueList?.unannotatedArtifactIds ?? []);
+
+	/** Strongest open-issue tone per artifact; info-only issues draw nothing on canvases. */
+	issueToneByArtifact = $derived.by(() => {
+		const map = new Map<string, IssueTone>();
+		for (const issue of this.openIssues) {
+			const tone = issueTone(issue);
+			if (tone === 'info') continue;
+			for (const id of issue.artifactIds) {
+				const current = map.get(id);
+				if (!current || TONE_RANK[tone] > TONE_RANK[current]) map.set(id, tone);
+			}
+		}
+		return map;
+	});
+
+	/** Strongest open-issue tone per unordered artifact pair (edges between issue beats). */
+	issueToneByPair = $derived.by(() => {
+		const map = new Map<string, IssueTone>();
+		for (const issue of this.openIssues) {
+			const tone = issueTone(issue);
+			if (tone === 'info') continue;
+			issue.artifactIds.forEach((a, i) => {
+				for (const b of issue.artifactIds.slice(i + 1)) {
+					const key = pairKey(a, b);
+					const current = map.get(key);
+					if (!current || TONE_RANK[tone] > TONE_RANK[current]) map.set(key, tone);
+				}
+			});
+		}
+		return map;
+	});
+
 	// ── Queries ─────────────────────────────────────────────────────────────────
 
 	candidatesOf(expansionId: string): ExpansionCandidate[] {
 		return this.candidatesByExpansion.get(expansionId) ?? [];
+	}
+
+	/** Open issues an artifact takes part in. */
+	issuesOf(artifactId: string): ValidationIssue[] {
+		return this.openIssues.filter((i) => i.artifactIds.includes(artifactId));
+	}
+
+	/** Ids in story order; beats off the path go last. */
+	inStoryOrder(ids: readonly string[]): string[] {
+		const at = (id: string) => this.beatIndex.get(id) ?? Number.MAX_SAFE_INTEGER;
+		return ids.toSorted((a, b) => at(a) - at(b));
+	}
+
+	/** Expansion whose bridge is this artifact: accepted, else a candidate of an open one. */
+	bridgeExpansionOf(artifactId: string): Expansion | null {
+		return (
+			this.expansions.find(
+				(e) => e.status === 'ACCEPTED' && e.selectedBridgeArtifactId === artifactId
+			) ??
+			this.expansions.find((e) => isOpen(e) && e.bridgeArtifactIds.includes(artifactId)) ??
+			null
+		);
+	}
+
+	/**
+	 * Story path through an artifact: the committed path, or for a pending candidate the
+	 * path as if it were accepted. Null when the artifact is on neither.
+	 */
+	pathThrough(artifactId: string): { path: string[]; hypothetical: boolean } | null {
+		if (this.beatIndex.has(artifactId)) return { path: this.storyPath, hypothetical: false };
+		const graph = this.validationGraph;
+		const expansion = this.expansions.find(
+			(e) => isOpen(e) && e.bridgeArtifactIds.includes(artifactId)
+		);
+		if (!graph || !expansion) return null;
+		const { path } = validateContinuity(graph, this.transitionsByArtifact, {
+			expansionId: expansion.id,
+			artifactId,
+			transition: this.transitionsByArtifact.get(artifactId)?.transition ?? EMPTY_TRANSITION
+		});
+		return path.includes(artifactId) ? { path, hypothetical: true } : null;
 	}
 
 	/** Expansions where the artifact is an anchor (left/right) or a submitted bridge. */
@@ -349,7 +680,8 @@ export class Workspace {
 	async reload() {
 		this.loading = true;
 		try {
-			this.graph = await api.getGraph(this.projectId);
+			const [graph] = await Promise.all([api.getGraph(this.projectId), this.reloadIssues()]);
+			this.graph = graph;
 			this.loadError = null;
 			this.revision++;
 		} catch (error) {
@@ -357,6 +689,16 @@ export class Workspace {
 			throw error;
 		} finally {
 			this.loading = false;
+		}
+	}
+
+	/** Loads beside the graph; a failure is shown in the Issues panel and never blocks the graph. */
+	async reloadIssues() {
+		try {
+			this.issueList = await api.listIssues(this.projectId);
+			this.issuesError = null;
+		} catch (error) {
+			this.issuesError = isApiError(error) ? error : new ApiError('BAD_RESPONSE', 0, String(error));
 		}
 	}
 
@@ -419,6 +761,69 @@ export class Workspace {
 		return this.#mutate(() =>
 			api.updateArtifact(this.projectId, artifact.id, artifact.headRevisionId, input)
 		);
+	}
+
+	/** New human annotation of the head revision; a moved head fails with STALE_REVISION. */
+	putTransition(
+		artifact: Pick<Artifact, 'id' | 'headRevisionId'>,
+		transition: TransitionInput,
+		reviewed: boolean
+	) {
+		return this.#mutate(() =>
+			api.putTransition(this.projectId, artifact.id, {
+				artifactRevisionId: artifact.headRevisionId,
+				transition,
+				source: 'human',
+				reviewed
+			})
+		);
+	}
+
+	/** Dismissal changes only the issue list, which the server returns recomputed. */
+	async dismissIssue(input: DismissIssueInput): Promise<IssueList> {
+		this.pending++;
+		try {
+			const list = await api.dismissIssue(this.projectId, input);
+			this.issueList = list;
+			this.issuesError = null;
+			return list;
+		} finally {
+			this.pending--;
+		}
+	}
+
+	/**
+	 * "Request C reconciliation": opens the expansion on the relation linking the issue's
+	 * two beats (creating one when none exists). Without a relation both beats become the
+	 * multi-selection. A one-beat issue pairs its beat with the next one on the path.
+	 */
+	async requestReconciliation(issue: ValidationIssue): Promise<'expansion' | 'selected' | null> {
+		const [left, second] = this.inStoryOrder(issue.artifactIds);
+		if (left === undefined) return null;
+		const right = second ?? this.storyPath[this.storyPath.indexOf(left) + 1];
+		if (right === undefined || right === left) return null;
+		const linking = this.relations.filter(
+			(r) =>
+				r.status !== 'REJECTED' &&
+				((r.fromId === left && r.toId === right) || (r.fromId === right && r.toId === left))
+		);
+		const relation = linking.find((r) => r.fromId === left) ?? linking[0];
+		if (relation) {
+			const existing = relation.expandedByExpansionId ?? this.openExpansionFor(relation.id)?.id;
+			if (existing) await this.select({ type: 'expansion', id: existing });
+			else await this.expandRelation(relation.id);
+			return 'expansion';
+		}
+		this.multi.clear();
+		this.multi.add(left);
+		this.multi.add(right);
+		this.highlight = {
+			relationId: null,
+			artifactIds: new Set([left, right]),
+			label: 'issue beats'
+		};
+		this.focusRequest = { artifactId: left, at: Date.now() };
+		return 'selected';
 	}
 
 	async createRelation(input: CreateRelationInput): Promise<Relation> {
@@ -488,6 +893,24 @@ export class Workspace {
 		);
 	}
 
+	// ── Composite artifacts ─────────────────────────────────────────────────────
+
+	async createComposite(input: CreateCompositeInput): Promise<CompositeView> {
+		const view = await this.#mutate(() => api.createComposite(this.projectId, input));
+		this.multi.clear();
+		this.composeMemberIds = null;
+		await this.select({ type: 'artifact', id: view.artifact.id });
+		return view;
+	}
+
+	reviseComposite(compositeId: string, input: ReviseCompositeInput): Promise<CompositeView> {
+		return this.#mutate(() => api.reviseComposite(this.projectId, compositeId, input));
+	}
+
+	archiveComposite(compositeId: string, reason?: string): Promise<Artifact> {
+		return this.#mutate(() => api.archiveComposite(this.projectId, compositeId, reason));
+	}
+
 	// ── Artifact Gateway admin (HUMAN) ──────────────────────────────────────────
 
 	createAgent(input: CreateAgentInput): Promise<AgentPrincipal> {
@@ -533,6 +956,14 @@ export class Workspace {
 		else this.collapsed.add(expansionId);
 	}
 
+	/** Open = draw the composite as a frame around its members (UI only). */
+	setCompositeOpen(compositeId: string, open: boolean) {
+		if (open) this.openComposites.add(compositeId);
+		else this.openComposites.delete(compositeId);
+		saveOpenComposites(this.projectId, this.openComposites);
+	}
+
+	/** Toggles the artifact highlight of a relation's provenance. */
 	showProvenance(relation: Relation) {
 		if (this.highlight?.relationId === relation.id) {
 			this.highlight = null;
@@ -547,7 +978,38 @@ export class Workspace {
 				if (expansion.selectedBridgeArtifactId) ids.add(expansion.selectedBridgeArtifactId);
 			}
 		}
-		this.highlight = { relationId: relation.id, artifactIds: ids };
+		this.highlight = { relationId: relation.id, artifactIds: ids, label: 'provenance' };
+	}
+
+	/** Toggles the highlight of beats validation cannot see (no transition annotation). */
+	showUnannotated() {
+		if (this.highlight?.label === UNANNOTATED_LABEL) {
+			this.highlight = null;
+			return;
+		}
+		this.highlight = {
+			relationId: null,
+			artifactIds: new Set(this.unannotatedIds),
+			label: UNANNOTATED_LABEL
+		};
+	}
+
+	/** Opens an artifact's inspector on the State tab. */
+	inspectState(artifactId: string) {
+		this.artifactTab = 'state';
+		return this.focusArtifact(artifactId);
+	}
+
+	/** Canvas edge (or its label) clicked: maps the drawn edge id to a selection. */
+	selectEdge(edgeId: string) {
+		// Fanned-out copies of one edge carry a `#n` suffix.
+		const id = edgeId.split('#')[0] ?? edgeId;
+		// Synthetic triangle sides are `tri:<expansionId>:<apexId>:<anchorId>`.
+		if (id.startsWith('tri:'))
+			return this.select({ type: 'expansion', id: id.slice(4, id.indexOf(':', 4)) });
+		if (id.startsWith('agg:')) return this.select({ type: 'aggregate', id });
+		if (id.startsWith('preview:')) return;
+		return this.select({ type: 'relation', id });
 	}
 }
 

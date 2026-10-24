@@ -2,10 +2,16 @@ import type { AgentRole, ArtifactKind, ArtifactStatus, OwnerScope } from '@tlon/
 
 /**
  * Visual category of an artifact (legend): semantic facts, explanations (BRIDGE kind),
- * unpublished candidates (PENDING candidates of open expansions), accepted bridges and
- * rejected artifacts.
+ * unpublished candidates (PENDING candidates of open expansions), accepted bridges,
+ * rejected and archived artifacts.
  */
-export type ArtifactCategory = 'fact' | 'explanation' | 'candidate' | 'bridge' | 'rejected';
+export type ArtifactCategory =
+	| 'fact'
+	| 'explanation'
+	| 'candidate'
+	| 'bridge'
+	| 'rejected'
+	| 'archived';
 
 export function artifactCategory(
 	artifact: { id: string; kind: ArtifactKind; status: ArtifactStatus },
@@ -13,6 +19,7 @@ export function artifactCategory(
 	acceptedBridgeIds: ReadonlySet<string>
 ): ArtifactCategory {
 	if (artifact.status === 'REJECTED') return 'rejected';
+	if (artifact.status === 'ARCHIVED') return 'archived';
 	if (pendingCandidateIds.has(artifact.id)) return 'candidate';
 	if (acceptedBridgeIds.has(artifact.id)) return 'bridge';
 	if (artifact.kind === 'BRIDGE') return 'explanation';
@@ -24,7 +31,8 @@ export const CATEGORY_LABEL: Record<ArtifactCategory, string> = {
 	explanation: 'Explanation (bridge kind)',
 	candidate: 'Unpublished candidate',
 	bridge: 'Accepted bridge',
-	rejected: 'Rejected'
+	rejected: 'Rejected',
+	archived: 'Archived'
 };
 
 /** Card classes per category; candidates are dashed, rejected are faded. */
@@ -33,7 +41,8 @@ export const CATEGORY_CARD: Record<ArtifactCategory, string> = {
 	explanation: 'border-sky-300 bg-sky-50/60',
 	candidate: 'border-dashed border-accent-500 bg-accent-50/70',
 	bridge: 'border-accent-500 bg-white ring-2 ring-accent-100',
-	rejected: 'border-dashed border-zinc-300 bg-zinc-100 opacity-60'
+	rejected: 'border-dashed border-zinc-300 bg-zinc-100 opacity-60',
+	archived: 'border-dotted border-zinc-400 bg-zinc-50 opacity-60'
 };
 
 export const KIND_BADGE: Record<ArtifactKind, string> = {
@@ -54,7 +63,8 @@ export const STATUS_TEXT: Record<ArtifactStatus, string> = {
 	PROPOSED: 'text-accent-600',
 	ACCEPTED: 'text-emerald-700',
 	REJECTED: 'text-zinc-400 line-through',
-	SUPERSEDED: 'text-zinc-400'
+	SUPERSEDED: 'text-zinc-400',
+	ARCHIVED: 'text-zinc-400 italic'
 };
 
 /** Short owner-scope label used on badges (A / B / C / Public). */

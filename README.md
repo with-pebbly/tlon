@@ -85,6 +85,13 @@ pnpm db:migrate
 5. Inspect any node: revisions (restore any version), relations, expansion lineage.
    Lock or pin artifacts; contradictions are listed under _Tensions_ as prompts.
 6. Reload — everything is persisted. Export/import JSON from the top bar or CLI.
+7. Continuity: the top-bar badge counts blockers; the overview's _Issues_ panel groups
+   them by kind (blockers red, warnings amber, tensions/perspective conflicts in the
+   creative tension style) with Compare neighbours, Request C reconciliation, Regenerate
+   bridge and dismiss/mark actions; the same tones ring nodes and stroke edges on the
+   Graph/Fractal canvases. An artifact's _State_ tab shows the incoming world state on the
+   story path and edits its transition annotation; _Issues report_ downloads the open
+   issues as Markdown with story beat numbers.
 
 ## API
 

@@ -1,5 +1,7 @@
 <script lang="ts">
-	import { BaseEdge, type EdgeProps } from '@xyflow/svelte';
+	import { arcGeometry, naturalDip } from '$lib/graph/arc';
+	import { getWorkspace } from '$lib/state/context';
+	import { BaseEdge, EdgeLabel, type EdgeProps } from '@xyflow/svelte';
 
 	let {
 		id,
@@ -10,33 +12,42 @@
 		sourceX,
 		sourceY,
 		targetX,
-		targetY
+		targetY,
+		data
 	}: EdgeProps = $props();
 
+	const ws = getWorkspace();
+
 	/**
-	 * Root relations of the pyramid run along (or between) cells of the base line; drawing
-	 * them as a shallow curve dipping below the line keeps them apart from triangle sides.
+	 * A shallow curve under the base line. `data.dip` (set by the canvas so labels of
+	 * neighbouring aggregated edges never overlap) wins over the natural dip.
 	 */
-	const geometry = $derived.by(() => {
-		const midX = (sourceX + targetX) / 2;
-		const dip = Math.min(140, 12 + Math.hypot(targetX - sourceX, targetY - sourceY) * 0.18);
-		const controlY = Math.max(sourceY, targetY) + dip;
-		return {
-			path: `M${sourceX},${sourceY} Q${midX},${controlY} ${targetX},${targetY}`,
-			labelX: midX,
-			// The quadratic curve's lowest point sits halfway between the line and the control point.
-			labelY: (Math.max(sourceY, targetY) + controlY) / 2
-		};
-	});
+	const geometry = $derived(
+		arcGeometry(
+			sourceX,
+			sourceY,
+			targetX,
+			targetY,
+			typeof data?.dip === 'number'
+				? data.dip
+				: naturalDip(
+						sourceX,
+						sourceY,
+						targetX,
+						targetY,
+						typeof data?.minDip === 'number' ? data.minDip : 0
+					)
+		)
+	);
 </script>
 
-<BaseEdge
-	{id}
-	path={geometry.path}
-	labelX={geometry.labelX}
-	labelY={geometry.labelY}
-	{label}
-	{style}
-	{markerEnd}
-	{interactionWidth}
-/>
+<BaseEdge {id} path={geometry.path} {style} {markerEnd} {interactionWidth} />
+{#if label}
+	<!-- The label selects its edge like a click on the line (URL-backed selection). -->
+	<EdgeLabel
+		x={geometry.labelX}
+		y={geometry.labelY}
+		class={['tlon-edge-label', data?.aggregated === true && 'italic']}
+		onclick={() => ws.selectEdge(id)}>{label}</EdgeLabel
+	>
+{/if}

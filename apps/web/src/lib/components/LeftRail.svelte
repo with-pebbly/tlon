@@ -2,6 +2,7 @@
 	import { getWorkspace } from '$lib/state/context';
 	import { ARTIFACT_KINDS, ARTIFACT_STATUSES } from '@tlon/contracts';
 
+	import CompositeOutlineNode from './CompositeOutlineNode.svelte';
 	import OutlineNode from './OutlineNode.svelte';
 
 	const ws = getWorkspace();
@@ -24,13 +25,44 @@
 			linked.add(r.toId);
 		}
 		return ws.artifacts.filter(
-			(a) => !linked.has(a.id) && a.status !== 'REJECTED' && !ws.pendingCandidateIds.has(a.id)
+			(a) =>
+				!linked.has(a.id) &&
+				a.status !== 'REJECTED' &&
+				a.status !== 'ARCHIVED' &&
+				!ws.pendingCandidateIds.has(a.id) &&
+				!ws.compositesById.has(a.id) &&
+				!ws.parentsOf.has(a.id)
 		);
+	});
+	/** Outline roots: shown composites no other shown composite contains. */
+	const rootComposites = $derived.by(() => {
+		const shown = new Set(
+			ws.composites
+				.map((c) => c.artifactId)
+				.filter((id) => {
+					const status = ws.artifactsById.get(id)?.status;
+					return status !== undefined && (status !== 'ARCHIVED' || f.showArchived);
+				})
+		);
+		return [...shown].filter((id) => !(ws.parentsOf.get(id) ?? []).some((p) => shown.has(p)));
 	});
 </script>
 
 <aside class="flex w-64 shrink-0 flex-col overflow-hidden border-r border-zinc-200 bg-white">
 	<div class="min-h-0 flex-1 overflow-y-auto">
+		{#if rootComposites.length > 0}
+			<section class="border-b border-zinc-100 px-3 py-2.5" aria-label="Composites">
+				<div class="mb-1.5 flex items-center justify-between">
+					<h2 class="section-title">Composites</h2>
+					<span class="text-[11px] text-zinc-400">{ws.composites.length}</span>
+				</div>
+				<ul class="-mx-1">
+					{#each rootComposites as id (id)}
+						<CompositeOutlineNode compositeId={id} />
+					{/each}
+				</ul>
+			</section>
+		{/if}
 		<section class="border-b border-zinc-100 px-3 py-2.5">
 			<div class="mb-1.5 flex items-center justify-between">
 				<h2 class="section-title">Outline</h2>
@@ -135,12 +167,25 @@
 					<input type="checkbox" bind:checked={f.showRejected} /> Show rejected
 				</label>
 				<label class="flex items-center gap-2">
+					<input type="checkbox" bind:checked={f.showArchived} /> Show archived
+				</label>
+				<label class="flex items-center gap-2">
 					<input type="checkbox" bind:checked={f.showCollapsedEdges} /> Show collapsed parent edges
 				</label>
 			</div>
 			{#if ws.collapsed.size > 0}
 				<button class="btn btn-sm self-start" onclick={() => ws.collapsed.clear()}>
 					Expand all collapsed subtrees ({ws.collapsed.size})
+				</button>
+			{/if}
+			{#if ws.openComposites.size > 0}
+				<button
+					class="btn btn-sm self-start"
+					onclick={() => {
+						for (const id of [...ws.openComposites]) ws.setCompositeOpen(id, false);
+					}}
+				>
+					Collapse all composites ({ws.openComposites.size})
 				</button>
 			{/if}
 		</section>

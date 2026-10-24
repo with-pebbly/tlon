@@ -6,6 +6,8 @@
 	import { onMount } from 'svelte';
 
 	import AgentsPanel from './AgentsPanel.svelte';
+	import CompareNeighbours from './CompareNeighbours.svelte';
+	import ComposeDrawer from './ComposeDrawer.svelte';
 	import DisclosuresPanel from './DisclosuresPanel.svelte';
 	import FractalView from './FractalView.svelte';
 	import GraphView from './GraphView.svelte';
@@ -32,7 +34,11 @@
 		if (event.key !== 'Escape' || event.defaultPrevented) return;
 		const target = event.target as HTMLElement | null;
 		if (target?.closest('input, textarea, select, dialog, [contenteditable="true"]')) return;
-		if (ws.selection) ws.select(null);
+		// One step back per press: drawer, multi-selection, selection, then drill-in level.
+		if (ws.composeMemberIds) ws.composeMemberIds = null;
+		else if (ws.multi.size > 0) ws.multi.clear();
+		else if (ws.selection) ws.select(null);
+		else if (ws.view === 'fractal' && ws.fractalIn !== null) ws.exitComposite();
 		ws.highlight = null;
 	}
 </script>
@@ -75,8 +81,22 @@
 {#if ws.newArtifactOpen}
 	<NewArtifactDialog onclose={() => (ws.newArtifactOpen = false)} />
 {/if}
+{#if ws.composeMemberIds}
+	{#key ws.composeMemberIds}
+		<ComposeDrawer memberIds={ws.composeMemberIds} onclose={() => (ws.composeMemberIds = null)} />
+	{/key}
+{/if}
 {#if ws.gatewayPanel === 'agents'}
 	<AgentsPanel onclose={() => (ws.gatewayPanel = null)} />
 {:else if ws.gatewayPanel === 'disclosures'}
 	<DisclosuresPanel onclose={() => (ws.gatewayPanel = null)} />
+{/if}
+{#if ws.compare}
+	{#key ws.compare}
+		<CompareNeighbours
+			artifactId={ws.compare.artifactId}
+			stateKey={ws.compare.stateKey}
+			onclose={() => (ws.compare = null)}
+		/>
+	{/key}
 {/if}

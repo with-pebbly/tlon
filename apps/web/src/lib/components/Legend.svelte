@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { ISSUE_TONE_TITLE, toneRing, type IssueTone } from '$lib/continuity';
 	import type { GraphLayout } from '$lib/graph/positions';
 	import { CATEGORY_CARD, CATEGORY_LABEL, SCOPE_DESCRIPTION, type ArtifactCategory } from '$lib/ui';
 	import { OWNER_SCOPES } from '@tlon/contracts';
@@ -7,7 +8,36 @@
 
 	let { layout }: { layout: GraphLayout } = $props();
 
-	const CATEGORIES: ArtifactCategory[] = ['fact', 'explanation', 'candidate', 'bridge', 'rejected'];
+	/** Continuity overlay (Issues panel): node mark and edge stroke per issue tone. */
+	const OVERLAY: readonly { tone: IssueTone; stroke: string; dash: string; detail: string }[] = [
+		{
+			tone: 'blocker',
+			stroke: 'var(--color-rose-500)',
+			dash: '',
+			detail: 'continuity or anchor violation on the story path'
+		},
+		{
+			tone: 'warning',
+			stroke: 'var(--color-amber-500)',
+			dash: '',
+			detail: 'abandoned preparation or stale annotation'
+		},
+		{
+			tone: 'creative',
+			stroke: 'var(--color-amber-500)',
+			dash: '4 3',
+			detail: 'never an error — a prompt for a bridge'
+		}
+	];
+
+	const CATEGORIES: ArtifactCategory[] = [
+		'fact',
+		'explanation',
+		'candidate',
+		'bridge',
+		'rejected',
+		'archived'
+	];
 
 	const CELLS = [
 		{
@@ -21,6 +51,18 @@
 		{
 			label: 'Candidate — proposed, not yet accepted',
 			class: 'border-dashed border-accent-500 bg-accent-50'
+		},
+		{
+			label: 'Collapsed composite — ◈ nesting level; “+” opens it, double-click drills in',
+			class: 'border-2 border-zinc-700 bg-white'
+		},
+		{
+			label: 'Open composite — dashed frame around its members (tab: Collapse)',
+			class: 'border-dashed border-zinc-400 bg-transparent'
+		},
+		{
+			label: 'Stale bridge — an anchor changed after acceptance',
+			class: 'rounded-full border-amber-500 bg-amber-400'
 		}
 	];
 
@@ -29,7 +71,12 @@
 		{ label: 'Proposed relation', dash: '5 3', color: 'var(--color-zinc-400)' },
 		{ label: 'Collapsed parent edge (expanded)', dash: '6 4', color: 'var(--color-zinc-400)' },
 		{ label: 'Candidate preview (to its anchors)', dash: '2 4', color: 'var(--color-accent-500)' },
-		{ label: 'contradicts — a creative tension', dash: '', color: 'var(--color-amber-500)' }
+		{ label: 'contradicts — a creative tension', dash: '', color: 'var(--color-amber-500)' },
+		{
+			label: 'aggregated (n) — virtual edge for relations inside a collapsed composite',
+			dash: '8 5',
+			color: 'var(--color-zinc-500)'
+		}
 	];
 </script>
 
@@ -61,6 +108,21 @@
 			</svg>
 			<span class="text-[11px] leading-4">Base link — a root relation (amber: contradicts)</span>
 		</div>
+		<div class="flex items-center gap-2">
+			<svg width="28" height="12" class="shrink-0" aria-hidden="true">
+				<path
+					d="M2 2 Q14 14 26 2"
+					fill="none"
+					stroke="var(--color-zinc-500)"
+					stroke-width="1.5"
+					stroke-dasharray="4 3"
+				/>
+			</svg>
+			<span class="text-[11px] leading-4"
+				>aggregated (n) — virtual edge for relations inside a collapsed composite; click to list
+				them</span
+			>
+		</div>
 		<p class="text-[11px] text-zinc-400">
 			Hover or select a cell for its title; zoom in to label every cell. Corner colour marks the
 			owner scope:
@@ -75,6 +137,32 @@
 			{/each}
 		</ul>
 	{/if}
+	<ul class="flex flex-col gap-1.5" aria-label="Continuity overlay">
+		{#each OVERLAY as entry (entry.tone)}
+			<li class="flex items-center gap-2">
+				<span
+					class={[
+						'inline-block size-3 shrink-0 rounded-[3px] border border-zinc-300 bg-white',
+						toneRing(entry.tone, false)
+					]}
+				></span>
+				<svg width="18" height="8" class="shrink-0" aria-hidden="true">
+					<line
+						x1="0"
+						y1="4"
+						x2="18"
+						y2="4"
+						stroke={entry.stroke}
+						stroke-width="2"
+						stroke-dasharray={entry.dash}
+					/>
+				</svg>
+				<span class="text-[11px] leading-4"
+					><span class="font-medium">{ISSUE_TONE_TITLE[entry.tone]}</span> — {entry.detail}</span
+				>
+			</li>
+		{/each}
+	</ul>
 	<ul class="flex flex-col gap-1" aria-label="Owner scopes">
 		{#each OWNER_SCOPES as scope (scope)}
 			<li class="flex items-start gap-2">

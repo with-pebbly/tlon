@@ -1,10 +1,12 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import { api } from '$lib/api';
+	import { renderIssuesMarkdown } from '$lib/continuity';
 	import { getWorkspace } from '$lib/state/context';
 	import { toasts } from '$lib/state/toasts.svelte';
 	import { VIEWS } from '$lib/state/workspace.svelte';
 	import { renderStoryMarkdown } from '@tlon/core';
+	import { tick } from 'svelte';
 
 	import KindBadge from './KindBadge.svelte';
 
@@ -77,6 +79,34 @@
 			exporting = false;
 		}
 	}
+
+	/** Markdown list of non-dismissed issues, numbered like the story export. */
+	async function exportIssues() {
+		exporting = true;
+		try {
+			const [graph, list] = await Promise.all([
+				api.getGraph(ws.projectId),
+				api.listIssues(ws.projectId)
+			]);
+			const { project, artifacts, relations, expansions } = graph;
+			download(
+				`${slug(project.name)}-issues.md`,
+				renderIssuesMarkdown({ project, artifacts, relations, expansions }, list),
+				'text/markdown'
+			);
+		} catch (error) {
+			toasts.error(error);
+		} finally {
+			exporting = false;
+		}
+	}
+
+	/** The Issues panel lives in the overview: clear the selection and scroll to it. */
+	async function openIssues() {
+		await ws.select(null);
+		await tick();
+		document.getElementById('issues-panel')?.scrollIntoView({ block: 'start' });
+	}
 </script>
 
 <header class="flex h-11 shrink-0 items-center gap-3 border-b border-zinc-200 bg-white px-3">
@@ -141,6 +171,24 @@
 		{/if}
 	</div>
 
+	{#if ws.issueList}
+		{@const others = ws.openIssues.length - ws.blockerCount}
+		<button
+			class={['btn btn-ghost btn-sm', ws.blockerCount > 0 ? 'text-rose-700' : 'text-zinc-500']}
+			title="Continuity issues of the story path — open the Issues panel"
+			onclick={openIssues}
+		>
+			{#if ws.blockerCount > 0}
+				<span class="chip border-rose-300 bg-rose-50 text-rose-700"
+					>● {ws.blockerCount} blocker{ws.blockerCount === 1 ? '' : 's'}</span
+				>
+			{:else}
+				✓ No blockers
+			{/if}
+			{#if others > 0}<span class="text-zinc-500">+{others} issue{others === 1 ? '' : 's'}</span
+				>{/if}
+		</button>
+	{/if}
 	{#if ws.tensions.length > 0}
 		<button
 			class="btn btn-ghost btn-sm text-amber-700"
@@ -173,6 +221,12 @@
 		onclick={exportStory}
 		disabled={exporting}
 		title="Linear manuscript in story order (Markdown)">Story</button
+	>
+	<button
+		class="btn"
+		onclick={exportIssues}
+		disabled={exporting}
+		title="Open continuity issues with beat numbers (Markdown)">Issues report</button
 	>
 	<button class="btn" onclick={exportJson} disabled={exporting}>Export</button>
 	<button class="btn btn-primary" onclick={() => (ws.newArtifactOpen = true)}>+ New artifact</button
