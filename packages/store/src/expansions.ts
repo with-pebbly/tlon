@@ -20,6 +20,7 @@ import {
 	acceptanceFingerprint,
 	assertCandidateArtifactAllowed,
 	assertDepthWithinLimit,
+	candidateIssues,
 	planChildRelations,
 	creationScopeFor,
 	resolveExpansionParent
@@ -31,10 +32,13 @@ import type { Db } from './db.ts';
 import { asUuid, audit, authorize, guardValidation, parseInput, type Ctx } from './internal.ts';
 import {
 	getArtifactRow,
+	loadDismissals,
 	loadExpansion,
 	loadExpansionDetail,
+	loadLatestAnnotations,
 	loadLineage,
 	loadRelations,
+	loadValidationGraph,
 	selectArtifacts
 } from './projections.ts';
 import { assertAcyclicInProject, assertEndpointsInProject } from './relations.ts';
@@ -45,6 +49,7 @@ import {
 	relations,
 	type ExpansionRow
 } from './schema.ts';
+import { insertAnnotation } from './validation.ts';
 
 const OPEN: readonly string[] = OPEN_EXPANSION_STATUSES;
 
@@ -367,9 +372,22 @@ export function expansionMethods(ctx: Ctx) {
 					.update(expansions)
 					.set({ status: 'REVIEW', attempts: expansion.attempts + 1, updatedAt: ctx.now() })
 					.where(eq(expansions.id, expansionId));
+				let annotationId: string | null = null;
+				if (data.transition !== undefined) {
+					const head = await getArtifactRow(ctx, tx, principal, projectId, artifactId);
+					const annotation = await insertAnnotation(ctx, tx, principal, projectId, {
+						artifactId,
+						artifactRevisionId: head.row.headRevisionId,
+						transition: data.transition,
+						source: 'author',
+						reviewed: false
+					});
+					annotationId = annotation.id;
+				}
 				await audit(ctx, tx, principal, projectId, 'expansion.candidate.submit', expansionId, {
 					candidateId,
-					artifactId
+					artifactId,
+					...(annotationId === null ? {} : { annotationId })
 				});
 				return loadExpansionDetail(ctx, tx, principal, projectId, expansionId);
 			});
@@ -498,16 +516,66 @@ export function expansionMethods(ctx: Ctx) {
 						artifactId: bridge.row.id
 					});
 				}
-				await appendRevision(
+				// Continuity gate: the candidate's latest annotation is checked against the whole committed
+				// path. No annotation → nothing to check. Replays returned above and never reach here.
+				const annotations = new Map(
+					(await loadLatestAnnotations(ctx, tx, principal, projectId)).map((a) => [a.artifactId, a])
+				);
+				const chosenAnnotation = annotations.get(chosen.artifactId);
+				let acknowledged: string[] = [];
+				if (chosenAnnotation) {
+					const [graph, dismissals] = await Promise.all([
+						loadValidationGraph(ctx, tx, principal, projectId),
+						loadDismissals(tx, projectId)
+					]);
+					const blockers = candidateIssues(graph, annotations, {
+						expansionId,
+						artifactId: chosen.artifactId,
+						transition: chosenAnnotation.transition
+					}).filter((issue) => issue.severity === 'blocker' && !dismissals.has(issue.key));
+					if (blockers.length > 0) {
+						if (principal.role !== 'HUMAN' || data.acknowledgeIssues === undefined) {
+							// Keys and ids only: explanations may quote artifact titles.
+							throw new TlonError(
+								'CONTINUITY_VIOLATION',
+								'accepting this candidate would break the continuity of the committed path',
+								{
+									issues: blockers.map(({ key, kind, severity, artifactIds, stateKey }) => ({
+										key,
+										kind,
+										severity,
+										artifactIds,
+										stateKey
+									}))
+								}
+							);
+						}
+						acknowledged = blockers.map((issue) => issue.key);
+					}
+				}
+				const baseReason = data.reason
+					? `accepted as bridge of expansion ${expansionId}: ${data.reason}`
+					: `accepted as bridge of expansion ${expansionId}`;
+				const accepted = await appendRevision(
 					ctx,
 					tx,
 					principal,
 					bridge,
 					{ status: 'ACCEPTED' },
-					data.reason
-						? `accepted as bridge of expansion ${expansionId}: ${data.reason}`
-						: `accepted as bridge of expansion ${expansionId}`
+					acknowledged.length > 0
+						? `${baseReason} [acknowledged continuity issues ${acknowledged.join(', ')}: ${data.acknowledgeIssues}]`
+						: baseReason
 				);
+				// Carry a current annotation onto the accepted revision so it is not reported as stale.
+				if (chosenAnnotation && chosenAnnotation.artifactRevisionId === bridge.row.headRevisionId) {
+					await insertAnnotation(ctx, tx, principal, projectId, {
+						artifactId: chosen.artifactId,
+						artifactRevisionId: accepted.row.headRevisionId,
+						transition: chosenAnnotation.transition,
+						source: chosenAnnotation.source,
+						reviewed: true
+					});
+				}
 				for (const other of candidates) {
 					if (other.id === chosen.id || other.reviewStatus !== 'PENDING') continue;
 					await tx
@@ -567,7 +635,8 @@ export function expansionMethods(ctx: Ctx) {
 				await audit(ctx, tx, principal, projectId, 'expansion.accept', expansionId, {
 					candidateId: chosen.id,
 					bridgeArtifactId: chosen.artifactId,
-					childRelationIds: childIds
+					childRelationIds: childIds,
+					...(acknowledged.length > 0 ? { acknowledgedIssueKeys: acknowledged } : {})
 				});
 				return buildAcceptResult(tx, principal, projectId, expansionId, false);
 			});

@@ -7,6 +7,7 @@ import {
 	type Expansion,
 	type ExpansionCandidate,
 	type ExpansionDetail,
+	type Composition,
 	type ExpansionStatus,
 	TlonError,
 	type OwnerScope,
@@ -19,26 +20,42 @@ import {
 	type RelationStatus,
 	type Role,
 	type CandidateReviewStatus,
-	OWNER_SCOPES
+	OWNER_SCOPES,
+	OPEN_EXPANSION_STATUSES,
+	Transition,
+	type IssueList,
+	type ProjectGraph,
+	type TransitionAnnotation,
+	type ValidationIssue
 } from '@tlon/contracts';
-import { expansionLineage, isActionAllowed, visibleScopesFor } from '@tlon/core';
-import { and, asc, eq, exists, gt, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
+import {
+	candidateIssues,
+	expansionLineage,
+	isActionAllowed,
+	validateContinuity,
+	visibleScopesFor
+} from '@tlon/core';
+import { and, asc, desc, eq, exists, gt, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
 
 import type { Db } from './db.ts';
-import type { Ctx } from './internal.ts';
+import { chunk, type Ctx } from './internal.ts';
 import {
 	artifactRevisions,
 	artifacts,
 	expansionCandidates,
 	expansions,
 	grants,
+	issueDismissals,
+	projects,
 	relations,
+	transitionAnnotations,
 	type ArtifactRow,
 	type CandidateRow,
 	type ExpansionRow,
 	type ProjectRow,
 	type RelationRow,
-	type RevisionRow
+	type RevisionRow,
+	type TransitionAnnotationRow
 } from './schema.ts';
 
 export function toProject(row: ProjectRow): Project {
@@ -57,6 +74,7 @@ export function toArtifact(row: ArtifactRow, version: number): Artifact {
 		id: row.id,
 		projectId: row.projectId,
 		kind: row.kind as ArtifactKind,
+		composition: row.composition as Composition,
 		title: row.title,
 		body: row.body,
 		structured: row.structured,
@@ -75,6 +93,7 @@ export function toArtifact(row: ArtifactRow, version: number): Artifact {
 export function snapshotOf(row: ArtifactRow): ArtifactSnapshot {
 	return {
 		kind: row.kind as ArtifactKind,
+		composition: row.composition as Composition,
 		title: row.title,
 		body: row.body,
 		structured: row.structured,
@@ -314,7 +333,8 @@ function orderChildren(leftArtifactId: string, children: RelationRow[]): Relatio
 function toExpansion(
 	row: ExpansionRow,
 	candidates: CandidateRow[],
-	children: RelationRow[]
+	children: RelationRow[],
+	staleSides: Array<'left' | 'right'>
 ): Expansion {
 	return {
 		id: row.id,
@@ -333,7 +353,8 @@ function toExpansion(
 		childRelationIds: orderChildren(row.leftArtifactId, children).map((c) => c.id),
 		createdAt: row.createdAt.toISOString(),
 		updatedAt: row.updatedAt.toISOString(),
-		acceptedAt: row.acceptedAt?.toISOString() ?? null
+		acceptedAt: row.acceptedAt?.toISOString() ?? null,
+		staleSides
 	};
 }
 
@@ -375,7 +396,29 @@ export async function loadExpansions(q: Db, projectId: string, where?: SQL): Pro
 	]);
 	const candidatesBy = groupBy(candidateRows, (c) => c.expansionId);
 	const childrenBy = groupBy(childRows, (c) => c.expansionId as string);
-	return rows.map((r) => toExpansion(r, candidatesBy.get(r.id) ?? [], childrenBy.get(r.id) ?? []));
+	const anchorIds = [
+		...new Set(
+			rows
+				.filter((r) => r.status === 'ACCEPTED')
+				.flatMap((r) => [r.leftArtifactId, r.rightArtifactId])
+		)
+	];
+	const heads = new Map<string, string>();
+	for (const part of chunk(anchorIds, 5000)) {
+		const found = await q
+			.select({ id: artifacts.id, head: artifacts.headRevisionId })
+			.from(artifacts)
+			.where(and(eq(artifacts.projectId, projectId), inArray(artifacts.id, part)));
+		for (const f of found) heads.set(f.id, f.head);
+	}
+	return rows.map((r) => {
+		const stale: Array<'left' | 'right'> = [];
+		if (r.status === 'ACCEPTED') {
+			if (heads.get(r.leftArtifactId) !== r.leftRevisionId) stale.push('left');
+			if (heads.get(r.rightArtifactId) !== r.rightRevisionId) stale.push('right');
+		}
+		return toExpansion(r, candidatesBy.get(r.id) ?? [], childrenBy.get(r.id) ?? [], stale);
+	});
 }
 
 export async function loadExpansion(
@@ -454,11 +497,19 @@ export async function loadExpansionDetail(
 	const ordered = [...childRelations].sort(
 		(a, b) => expansion.childRelationIds.indexOf(a.id) - expansion.childRelationIds.indexOf(b.id)
 	);
+	const issuesByArtifact = await loadCandidateIssues(
+		ctx,
+		q,
+		principal,
+		projectId,
+		expansion,
+		candidates
+	);
 	return {
 		expansion,
 		candidates: candidates.flatMap((c) => {
 			const artifact = visible.get(c.artifactId);
-			return artifact ? [{ ...c, artifact }] : [];
+			return artifact ? [{ ...c, artifact, issues: issuesByArtifact.get(c.artifactId) ?? [] }] : [];
 		}),
 		left,
 		right,
@@ -466,4 +517,185 @@ export async function loadExpansionDetail(
 		childRelations: ordered,
 		lineage
 	};
+}
+
+export function toAnnotation(row: TransitionAnnotationRow): TransitionAnnotation {
+	return {
+		id: row.id,
+		artifactId: row.artifactId,
+		artifactRevisionId: row.artifactRevisionId,
+		transition: Transition.parse(row.transition),
+		source: row.source as TransitionAnnotation['source'],
+		reviewed: row.reviewed,
+		actorId: row.actorId,
+		createdAt: row.createdAt.toISOString()
+	};
+}
+
+/** Latest annotation of every artifact the principal can see (annotations of hidden artifacts never appear). */
+export async function loadLatestAnnotations(
+	ctx: Ctx,
+	q: Db,
+	principal: Principal,
+	projectId: string
+): Promise<TransitionAnnotation[]> {
+	const rows = await q
+		.selectDistinctOn([transitionAnnotations.artifactId], { a: transitionAnnotations })
+		.from(transitionAnnotations)
+		.innerJoin(artifacts, eq(artifacts.id, transitionAnnotations.artifactId))
+		.where(
+			and(
+				eq(transitionAnnotations.projectId, projectId),
+				visibleArtifactPredicate(q, principal, ctx.now())
+			)
+		)
+		.orderBy(
+			asc(transitionAnnotations.artifactId),
+			desc(transitionAnnotations.createdAt),
+			desc(transitionAnnotations.id)
+		);
+	return rows
+		.map((r) => toAnnotation(r.a))
+		.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+}
+
+/** Every annotation (full history, oldest first) of the artifacts the principal can see. */
+export async function loadAllAnnotations(
+	ctx: Ctx,
+	q: Db,
+	principal: Principal,
+	projectId: string
+): Promise<TransitionAnnotation[]> {
+	const rows = await q
+		.select({ a: transitionAnnotations })
+		.from(transitionAnnotations)
+		.innerJoin(artifacts, eq(artifacts.id, transitionAnnotations.artifactId))
+		.where(
+			and(
+				eq(transitionAnnotations.projectId, projectId),
+				visibleArtifactPredicate(q, principal, ctx.now())
+			)
+		)
+		.orderBy(asc(transitionAnnotations.createdAt), asc(transitionAnnotations.id));
+	return rows.map((r) => toAnnotation(r.a));
+}
+
+export type Dismissal = NonNullable<ValidationIssue['dismissal']>;
+
+/** Latest human resolution per issue key. */
+export async function loadDismissals(q: Db, projectId: string): Promise<Map<string, Dismissal>> {
+	const rows = await q
+		.select()
+		.from(issueDismissals)
+		.where(eq(issueDismissals.projectId, projectId))
+		.orderBy(asc(issueDismissals.createdAt), asc(issueDismissals.id));
+	const map = new Map<string, Dismissal>();
+	for (const r of rows) {
+		map.set(r.issueKey, {
+			resolution: r.resolution as Dismissal['resolution'],
+			reason: r.reason,
+			actorId: r.actorId,
+			createdAt: r.createdAt.toISOString()
+		});
+	}
+	return map;
+}
+
+export function withDismissals(
+	issues: ReadonlyArray<Omit<ValidationIssue, 'dismissal'>>,
+	dismissals: ReadonlyMap<string, Dismissal>
+): ValidationIssue[] {
+	return issues.map((issue) => ({ ...issue, dismissal: dismissals.get(issue.key) ?? null }));
+}
+
+/**
+ * The project as the principal sees it, shaped for continuity validation. Expansions whose
+ * anchors are hidden are dropped so replays and explanations never mention hidden titles.
+ */
+export async function loadValidationGraph(
+	ctx: Ctx,
+	q: Db,
+	principal: Principal,
+	projectId: string
+): Promise<Pick<ProjectGraph, 'project' | 'artifacts' | 'relations' | 'expansions'>> {
+	const [[project], artifactList, relationList, expansionList] = await Promise.all([
+		q.select().from(projects).where(eq(projects.id, projectId)),
+		selectArtifacts(ctx, q, principal, projectId),
+		loadRelations(ctx, q, principal, projectId),
+		loadExpansions(q, projectId)
+	]);
+	if (!project) throw new TlonError('PROJECT_NOT_FOUND', 'project not found', { projectId });
+	const visible = new Set(artifactList.map((a) => a.id));
+	return {
+		project: toProject(project),
+		artifacts: artifactList,
+		relations: relationList,
+		expansions: expansionList.filter(
+			(e) => visible.has(e.leftArtifactId) && visible.has(e.rightArtifactId)
+		)
+	};
+}
+
+/** Continuity issues of the committed path as the principal sees it, dismissals merged by key. */
+export async function loadIssueList(
+	ctx: Ctx,
+	q: Db,
+	principal: Principal,
+	projectId: string
+): Promise<IssueList> {
+	const [graph, annotations, dismissals] = await Promise.all([
+		loadValidationGraph(ctx, q, principal, projectId),
+		loadLatestAnnotations(ctx, q, principal, projectId),
+		loadDismissals(q, projectId)
+	]);
+	const result = validateContinuity(graph, new Map(annotations.map((a) => [a.artifactId, a])));
+	return {
+		items: withDismissals(result.issues, dismissals),
+		unannotatedArtifactIds: result.unannotatedArtifactIds
+	};
+}
+
+/**
+ * Issues each pending candidate of an open expansion would add if accepted now, computed on
+ * the caller-visible graph. Only principals with `validation.read` get any; candidates
+ * without an annotation have nothing to check.
+ */
+async function loadCandidateIssues(
+	ctx: Ctx,
+	q: Db,
+	principal: Principal,
+	projectId: string,
+	expansion: Expansion,
+	candidates: ExpansionCandidate[]
+): Promise<Map<string, ValidationIssue[]>> {
+	const out = new Map<string, ValidationIssue[]>();
+	if (
+		!isActionAllowed(principal, 'validation.read') ||
+		!OPEN_EXPANSION_STATUSES.includes(expansion.status)
+	) {
+		return out;
+	}
+	const pending = candidates.filter((c) => c.reviewStatus === 'PENDING');
+	if (pending.length === 0) return out;
+	const annotations = new Map(
+		(await loadLatestAnnotations(ctx, q, principal, projectId)).map((a) => [a.artifactId, a])
+	);
+	const annotated = pending.filter((c) => annotations.has(c.artifactId));
+	if (annotated.length === 0) return out;
+	const [graph, dismissals] = await Promise.all([
+		loadValidationGraph(ctx, q, principal, projectId),
+		loadDismissals(q, projectId)
+	]);
+	const visible = new Set(graph.artifacts.map((a) => a.id));
+	for (const c of annotated) {
+		const annotation = annotations.get(c.artifactId);
+		if (!annotation || !visible.has(c.artifactId)) continue;
+		const issues = candidateIssues(graph, annotations, {
+			expansionId: expansion.id,
+			artifactId: c.artifactId,
+			transition: annotation.transition
+		});
+		out.set(c.artifactId, withDismissals(issues, dismissals));
+	}
+	return out;
 }

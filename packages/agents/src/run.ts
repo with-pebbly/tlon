@@ -71,6 +71,14 @@ const maxRounds = Number(values.rounds);
 const bridgesPerRound = Number(values['bridges-per-round']);
 const maxDepth = Number(values['max-depth']);
 
+class OperatorError extends Error {
+	readonly code: string;
+	constructor(code: string, message: string) {
+		super(`${code}: ${message}`);
+		this.code = code;
+	}
+}
+
 /** Operator calls (tokenless localhost). Orchestrator only — never exposed to agents. */
 async function operator<T>(
 	method: string,
@@ -87,11 +95,9 @@ async function operator<T>(
 	const json: unknown = await response.json();
 	if (!response.ok) {
 		const parsed = ApiErrorBody.safeParse(json);
-		throw new Error(
-			parsed.success
-				? `${parsed.data.error.code}: ${parsed.data.error.message}`
-				: `HTTP ${response.status}`
-		);
+		throw parsed.success
+			? new OperatorError(parsed.data.error.code, parsed.data.error.message)
+			: new OperatorError('INTERNAL', `HTTP ${response.status}`);
 	}
 	return schema.parse(json);
 }
@@ -117,8 +123,15 @@ const modelRegistry = new ModelRegistry(authStorage);
 await modelRegistry.refresh();
 const toolErrors: string[] = [];
 
+const stopped = new Map<string, string>();
+
 async function runAgent(agent: Agent, projectId: string, prompt: string): Promise<string> {
-	const tools = toolsForRole(agent.role, new GatewayClient(api, projectId, agent.token));
+	const tools = toolsForRole(agent.role, new GatewayClient(api, projectId, agent.token), {
+		onStop: (relationId, reason) => {
+			stopped.set(relationId, reason);
+			console.log(`[${agent.role}] ■ stop ${relationId.slice(0, 8)}: ${reason}`);
+		}
+	});
 	const { session, modelFallbackMessage } = await createAgentSession({
 		cwd: mkdtempSync(join(tmpdir(), `tlon-agent-${agent.role}-`)),
 		authStorage,
@@ -187,7 +200,13 @@ function openIntervals(g: ProjectGraph): Array<{ relation: Relation; depth: numb
 	);
 	return (
 		g.relations
-			.filter((r) => r.status !== 'REJECTED' && r.expandedByExpansionId === null && !busy.has(r.id))
+			.filter(
+				(r) =>
+					r.status !== 'REJECTED' &&
+					r.expandedByExpansionId === null &&
+					!busy.has(r.id) &&
+					!stopped.has(r.id)
+			)
 			.map((relation) => ({
 				relation,
 				depth: relation.expansionId === null ? 1 : (depthOf.get(relation.expansionId) ?? 0) + 1
@@ -217,9 +236,19 @@ function chainEnds(g: ProjectGraph, scope: 'A_PRIVATE' | 'B_PRIVATE') {
 	};
 }
 
-async function acceptReviewedBridges(projectId: string): Promise<number> {
+type Rejection = { expansionId: string; title: string; explanation: string };
+
+/**
+ * Accepts each reviewed bridge as the operator. The gateway refuses candidates that
+ * add blocker continuity issues (CONTINUITY_VIOLATION); those are rejected — never
+ * force-accepted — and returned so C can submit a corrected candidate.
+ */
+async function acceptReviewedBridges(
+	projectId: string
+): Promise<{ accepted: number; rejected: Rejection[] }> {
 	const g = await graphOf(projectId);
 	let accepted = 0;
+	const rejected: Rejection[] = [];
 	for (const e of g.expansions.filter((x) => x.status === 'REVIEW')) {
 		const detail = await operator(
 			'GET',
@@ -228,16 +257,30 @@ async function acceptReviewedBridges(projectId: string): Promise<number> {
 		);
 		const candidate = detail.candidates.find((c) => c.reviewStatus === 'PENDING');
 		if (!candidate) continue;
-		await operator(
-			'POST',
-			`/projects/${projectId}/expansions/${e.id}/accept`,
-			AcceptExpansionResult,
-			{ candidateId: candidate.id, reason: 'accepted by runner auto-accept policy' },
-			{ 'idempotency-key': randomUUID() }
-		);
-		accepted++;
+		try {
+			await operator(
+				'POST',
+				`/projects/${projectId}/expansions/${e.id}/accept`,
+				AcceptExpansionResult,
+				{ candidateId: candidate.id, reason: 'accepted by runner auto-accept policy' },
+				{ 'idempotency-key': randomUUID() }
+			);
+			accepted++;
+		} catch (error) {
+			if (!(error instanceof OperatorError) || error.code !== 'CONTINUITY_VIOLATION') throw error;
+			const explanation = candidate.issues
+				.filter((i) => i.severity === 'blocker')
+				.map((i) => i.explanation)
+				.join(' | ');
+			await operator('POST', `/projects/${projectId}/expansions/${e.id}/reject`, ExpansionDetail, {
+				candidateId: candidate.id,
+				reason: 'continuity validation failed'
+			});
+			rejected.push({ expansionId: e.id, title: candidate.artifact.title, explanation });
+			console.log(`  ✗ rejected "${candidate.artifact.title}": ${explanation}`);
+		}
 	}
-	return accepted;
+	return { accepted, rejected };
 }
 
 async function publishPendingDisclosures(projectId: string): Promise<number> {
@@ -306,13 +349,37 @@ for (let round = 1; round <= maxRounds; round++) {
 	await runAgent(
 		c,
 		projectId,
-		`Premise: ${premise}\nBridge each of these intervals (one candidate each). Each bridge is a concrete beat that happens between its two ends and makes both true; deeper levels zoom into finer moments:\n${tasks.join('\n')}`
+		[
+			`Premise: ${premise}`,
+			'For each interval below decide: BRIDGE it (one candidate with a full state contract) or STOP it with interval_stop when another beat would only restate motions, delay an established outcome or add no new causal information, character choice or reversal. Uneven depth is good pacing.',
+			'Before bridging, call artifact_list_visible and read the `state` of both ends and of their neighbours: your preconditions must match what the left end leaves, your effects must leave what the right end requires, and you must not perform the right end’s own irreversible event.',
+			...tasks
+		].join('\n')
 	);
 	if (values.review) {
 		console.log('\n--review: bridge candidates await your decision in the web UI. Stopping.');
 		break;
 	}
-	console.log(`accepted ${await acceptReviewedBridges(projectId)} bridges`);
+	let result = await acceptReviewedBridges(projectId);
+	let accepted = result.accepted;
+	if (result.rejected.length > 0) {
+		await runAgent(
+			c,
+			projectId,
+			[
+				`Premise: ${premise}`,
+				'These candidates failed continuity validation and were rejected. For each, submit ONE corrected candidate to the same expansionId (or interval_stop its relation if the interval needs no beat). Fix the state contract, not just the wording:',
+				...result.rejected.map(
+					(r) => `- expansionId=${r.expansionId} "${r.title}": ${r.explanation}`
+				)
+			].join('\n')
+		);
+		result = await acceptReviewedBridges(projectId);
+		accepted += result.accepted;
+	}
+	console.log(
+		`accepted ${accepted} bridges, rejected ${result.rejected.length}, stopped ${stopped.size} intervals so far`
+	);
 }
 
 if (!values.review) {
@@ -368,10 +435,12 @@ console.log(
 			accepted_bridges: bridges.length,
 			max_depth: Math.max(0, ...bridges.map((e) => e.depth)),
 			tool_errors: toolErrors.length,
+			stopped_intervals: stopped.size,
 			isolation_failures: failures
 		},
 		null,
 		2
 	)
 );
-if (failures.length > 0 || blocks(final) < target) process.exitCode = 1;
+// Ending below --target is fine: STOP decisions are pacing, not failure.
+if (failures.length > 0) process.exitCode = 1;

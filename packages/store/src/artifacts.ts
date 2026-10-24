@@ -97,7 +97,8 @@ export async function insertArtifact(
 	values: Pick<
 		ArtifactRow,
 		'kind' | 'title' | 'body' | 'structured' | 'status' | 'ownerScope' | 'locked' | 'pinned'
-	>,
+	> &
+		Partial<Pick<ArtifactRow, 'composition'>>,
 	reason: string | null,
 	/** Override for artifacts authored on behalf of another role (e.g. a published disclosure is C's). */
 	creatorRole: Role = principal.role

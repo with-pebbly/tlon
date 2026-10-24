@@ -12,11 +12,13 @@ import {
 import { isActionAllowed } from '@tlon/core';
 import { asc, eq, inArray } from 'drizzle-orm';
 
+import { loadCompositeSummaries } from './composites.ts';
 import { assertAllowed, audit, authorize, parseInput, type Ctx } from './internal.ts';
 import {
 	countVisibleArtifacts,
 	loadCandidates,
 	loadExpansions,
+	loadLatestAnnotations,
 	loadRelations,
 	selectArtifacts,
 	toProject
@@ -113,7 +115,9 @@ export function projectMethods(ctx: Ctx) {
 				artifacts: artifactList,
 				relations: relationList,
 				expansions: expansionList,
-				candidates: candidateList
+				candidates: candidateList,
+				composites: await loadCompositeSummaries(db, projectId, artifactList, relationList),
+				transitions: await loadLatestAnnotations(ctx, db, principal, projectId)
 			};
 		}
 	};

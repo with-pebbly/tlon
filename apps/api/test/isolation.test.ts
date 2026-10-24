@@ -919,3 +919,191 @@ describe('audit and observability', () => {
 		expect(logs.toLowerCase()).not.toContain('bearer');
 	});
 });
+
+describe('composites respect isolation', () => {
+	const randomId = randomUUID();
+	type View = {
+		artifact: Artifact;
+		memberArtifacts: Artifact[];
+		relations: Relation[];
+		externalRelations: Relation[];
+		definition: {
+			members: Array<{ artifactId: string }>;
+			memberRelationIds: string[];
+			boundary: { entries: string[]; exits: string[] };
+			contract: { keyClaims: Array<{ claimId: string }> };
+		};
+	};
+
+	it('lets the human compose over A and B private members publicly, but not under a narrower scope', async () => {
+		const ok = await call<View>('POST', `${base()}/composites`, {
+			body: {
+				title: 'public interface',
+				memberArtifactIds: [w.a1.id, w.b1.id],
+				memberRelationIds: [w.rel.id],
+				ownerScope: 'PROJECT_PUBLIC',
+				contract: { summary: 'public summary' }
+			}
+		});
+		expect(ok.status).toBe(201);
+		expect(ok.body.artifact.composition).toBe('COMPOSITE');
+		for (const scope of ['A_PRIVATE', 'B_PRIVATE']) {
+			const leak = await call<ApiErrorBody>('POST', `${base()}/composites`, {
+				body: { title: 'leaky', memberArtifactIds: [w.a1.id, w.b1.id], ownerScope: scope }
+			});
+			expect([scope, leak.status, leak.body.error.code]).toEqual([scope, 422, 'SCOPE_LEAK']);
+		}
+	});
+
+	it('answers A composing over a B artifact exactly like a random id', async () => {
+		const { A } = w.agents;
+		const hidden = await call<ApiErrorBody>('POST', `${base()}/composites`, {
+			token: A.token,
+			body: { title: 'peek', memberArtifactIds: [w.b1.id] }
+		});
+		const random = await call<ApiErrorBody>('POST', `${base()}/composites`, {
+			token: A.token,
+			body: { title: 'peek', memberArtifactIds: [randomId] }
+		});
+		expect([hidden.status, hidden.body.error.code]).toEqual([404, 'ARTIFACT_NOT_FOUND']);
+		expect(norm(hidden.body, w.b1.id)).toBe(norm(random.body, randomId));
+		expect(hidden.text).not.toContain('BRAVO-TITLE');
+		const rel = await call<ApiErrorBody>('POST', `${base()}/composites`, {
+			token: A.token,
+			body: { title: 'peek', memberArtifactIds: [w.a1.id], memberRelationIds: [w.rel.id] }
+		});
+		expect([rel.status, rel.body.error.code]).toEqual([404, 'RELATION_NOT_FOUND']);
+	});
+
+	it('forces an agent composite into its own scope and keeps it from the other side', async () => {
+		const { A, B } = w.agents;
+		const made = await call<View>('POST', `${base()}/composites`, {
+			token: A.token,
+			body: {
+				title: 'a arc',
+				memberArtifactIds: [w.a1.id, w.a2.id],
+				ownerScope: 'PROJECT_PUBLIC',
+				status: 'ACCEPTED'
+			}
+		});
+		expect(made.status).toBe(201);
+		expect(made.body.artifact.ownerScope).toBe('A_PRIVATE');
+		expect(made.body.artifact.status).toBe('PROPOSED');
+		const id = made.body.artifact.id;
+		expect((await call('GET', `${base()}/composites/${id}`, { token: B.token })).status).toBe(404);
+		expect(
+			(await call('POST', `${base()}/composites/${id}/archive`, { token: B.token })).status
+		).toBe(404);
+		expect(
+			(
+				await call('POST', `${base()}/composites/${id}/revisions`, {
+					token: B.token,
+					body: { expectedDefinitionVersion: 1 }
+				})
+			).status
+		).toBe(404);
+		expect((await call('GET', `${base()}/composites/${id}`, { token: A.token })).status).toBe(200);
+		// An atomic artifact is not a composite.
+		const atomic = await call<ApiErrorBody>('GET', `${base()}/composites/${w.a1.id}`, {
+			token: A.token
+		});
+		expect([atomic.status, atomic.body.error.code]).toEqual([422, 'NOT_A_COMPOSITE']);
+		// VALIDATOR reads but never composes.
+		expect(
+			(await call('GET', `${base()}/composites/${id}`, { token: w.agents.V.token })).status
+		).toBe(200);
+		expect(
+			(
+				await call('POST', `${base()}/composites`, {
+					token: w.agents.V.token,
+					body: { title: 'v', memberArtifactIds: [w.a1.id] }
+				})
+			).status
+		).toBe(403);
+	});
+
+	it('shows a granted composite to A without any B member, relation, claim or count', async () => {
+		const { A } = w.agents;
+		const b1Head = (await call<Artifact>('GET', `${base()}/artifacts/${w.b1.id}`)).body;
+		const a1Head = (await call<Artifact>('GET', `${base()}/artifacts/${w.a1.id}`)).body;
+		const made = await call<View>('POST', `${base()}/composites`, {
+			body: {
+				title: 'granted interface',
+				memberArtifactIds: [w.a1.id, w.b1.id],
+				memberRelationIds: [w.rel.id],
+				ownerScope: 'PROJECT_PUBLIC',
+				contract: {
+					summary: 'public summary',
+					keyClaims: [
+						{
+							claimId: 'from-b',
+							text: 'claim resting on b',
+							sourceArtifactId: w.b1.id,
+							sourceRevisionId: b1Head.headRevisionId
+						},
+						{
+							claimId: 'from-a',
+							text: 'claim resting on a',
+							sourceArtifactId: w.a1.id,
+							sourceRevisionId: a1Head.headRevisionId
+						}
+					]
+				}
+			}
+		});
+		expect(made.status).toBe(201);
+		const id = made.body.artifact.id;
+		expect((await call('GET', `${base()}/composites/${id}`, { token: A.token })).status).toBe(404);
+
+		const grant = await call<Grant>('POST', `${base()}/grants`, {
+			body: { granteePrincipalId: A.id, artifactId: id }
+		});
+		expect(grant.status).toBe(201);
+
+		const viewed = await call<View>('GET', `${base()}/composites/${id}?depth=3`, {
+			token: A.token
+		});
+		expect(viewed.status).toBe(200);
+		expect(viewed.body.memberArtifacts.map((m) => m.id)).toEqual([w.a1.id]);
+		expect(viewed.body.definition.members.map((m) => m.artifactId)).toEqual([w.a1.id]);
+		expect(viewed.body.relations).toEqual([]);
+		expect(viewed.body.externalRelations.map((r) => r.id)).not.toContain(w.rel.id);
+		expect(viewed.body.definition.memberRelationIds).toEqual([]);
+		expect(viewed.body.definition.contract.keyClaims.map((c) => c.claimId)).toEqual(['from-a']);
+		expect(viewed.body.definition.boundary.entries).not.toContain(w.b1.id);
+		expect(viewed.body.definition.boundary.exits).not.toContain(w.b1.id);
+
+		const revisions = await call(`GET`, `${base()}/composites/${id}/revisions`, { token: A.token });
+		const graph = await call<ProjectGraph>('GET', `${base()}/graph`, { token: A.token });
+		const search = await call('GET', `${base()}/artifacts?q=BRAVO`, { token: A.token });
+		const exported = await call('GET', `${base()}/export`, { token: A.token });
+		expect([revisions.status, graph.status, search.status, exported.status]).toEqual([
+			200, 200, 200, 403
+		]);
+		// Free-text bodies A itself wrote may mention any id; structural fields must not.
+		expect(graph.body.artifacts.map((a) => a.id)).not.toContain(w.b1.id);
+		expect(graph.body.relations.map((r) => r.id)).not.toContain(w.rel.id);
+		expect(JSON.stringify(graph.body.composites)).not.toContain(w.b1.id);
+		expect(graph.text).not.toContain('claim resting on b');
+		expect(graph.text).not.toContain('BRAVO-TITLE');
+		for (const text of [viewed.text, revisions.text, search.text]) {
+			expect(text).not.toContain(w.b1.id);
+			expect(text).not.toContain(w.rel.id);
+			expect(text).not.toContain('BRAVO-TITLE');
+			expect(text).not.toContain('bravo-secret');
+			expect(text).not.toContain('claim resting on b');
+		}
+		const summary = graph.body.composites.find((c) => c.artifactId === id);
+		expect(summary?.memberArtifactIds).toEqual([w.a1.id]);
+		expect((await call('GET', `${base()}/artifacts/${w.b1.id}`, { token: A.token })).status).toBe(
+			404
+		);
+		// A holds only a read grant: no archive, no revision.
+		expect(
+			(await call('POST', `${base()}/composites/${id}/archive`, { token: A.token })).status
+		).toBe(403);
+		// The human still sees everything.
+		const full = await call<View>('GET', `${base()}/composites/${id}`);
+		expect(full.body.memberArtifacts.map((m) => m.id).sort()).toEqual([w.a1.id, w.b1.id].sort());
+	});
+});

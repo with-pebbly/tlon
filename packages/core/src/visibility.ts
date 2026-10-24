@@ -61,7 +61,10 @@ export type GatewayAction =
 	| 'import'
 	| 'composite.create'
 	| 'composite.revise'
-	| 'composite.read';
+	| 'composite.read'
+	| 'transition.write'
+	| 'validation.read'
+	| 'issue.dismiss';
 
 /**
  * Role → action matrix (§7.1/§7.4, MVP approval policy: human reviews). A/B never see
@@ -85,7 +88,10 @@ const ALLOWED: Record<Principal['role'], readonly GatewayAction[]> = {
 		'import',
 		'composite.create',
 		'composite.revise',
-		'composite.read'
+		'composite.read',
+		'transition.write',
+		'validation.read',
+		'issue.dismiss'
 	],
 	C: [
 		'project.read',
@@ -98,16 +104,19 @@ const ALLOWED: Record<Principal['role'], readonly GatewayAction[]> = {
 		'disclosure.read',
 		'composite.create',
 		'composite.revise',
-		'composite.read'
+		'composite.read',
+		'transition.write',
+		'validation.read'
 	],
-	VALIDATOR: ['project.read', 'expansion.read', 'composite.read'],
+	VALIDATOR: ['project.read', 'expansion.read', 'composite.read', 'validation.read'],
 	A: [
 		'project.read',
 		'artifact.create',
 		'relation.create',
 		'composite.create',
 		'composite.revise',
-		'composite.read'
+		'composite.read',
+		'transition.write'
 	],
 	B: [
 		'project.read',
@@ -115,7 +124,8 @@ const ALLOWED: Record<Principal['role'], readonly GatewayAction[]> = {
 		'relation.create',
 		'composite.create',
 		'composite.revise',
-		'composite.read'
+		'composite.read',
+		'transition.write'
 	]
 };
 

@@ -11,6 +11,19 @@ const Key = z
 	.regex(/^[a-z0-9_.:-]+$/, 'lower_snake identifiers joined by dots, e.g. mercury_bath.level');
 
 /**
+ * Canonical state token: lower_snake, so "FULL", "Full " and "full" compare equal.
+ * Values are meant to be short enumerations (`full`, `falling`, `open`); prose detail
+ * belongs in `note`, otherwise "uncapped" and "uncapped, on the rail" read as a clash.
+ */
+export const canonicalStateValue = (raw: string): string =>
+	raw
+		.normalize('NFKD')
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '_')
+		.replace(/^_+|_+$/g, '')
+		.slice(0, 60) || '_';
+
+/**
  * One state claim of a beat (GENERATION_REVIEW "NarrativeAssertion"). `subject` +
  * `predicate` form the state key; only `world` assertions drive continuity replay —
  * beliefs, rumours and hypotheses may disagree without breaking the path.
@@ -18,7 +31,13 @@ const Key = z
 export const Assertion = z.object({
 	subject: Key,
 	predicate: Key,
-	value: z.union([z.string().trim().min(1).max(200), z.number(), z.boolean()]),
+	value: z.union([
+		z.string().trim().min(1).max(200).transform(canonicalStateValue),
+		z.number(),
+		z.boolean()
+	]),
+	/** Free-text detail that never takes part in comparisons. */
+	note: z.string().trim().max(300).optional(),
 	epistemic: z.enum(['world', 'belief', 'rumor', 'hypothesis']).default('world'),
 	/** Whose belief/rumour this is (required in spirit for non-world assertions). */
 	holder: z.string().trim().max(120).optional(),

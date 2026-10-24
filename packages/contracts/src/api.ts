@@ -21,6 +21,7 @@ import {
 	Uuid
 } from './models.ts';
 import { BridgeStructured, StructuredRecord } from './structured.ts';
+import { Transition, TransitionAnnotation, ValidationIssue } from './validation.ts';
 
 /** HTTP header carrying the expected head revision ID for optimistic concurrency. */
 export const IF_MATCH_HEADER = 'if-match';
@@ -142,19 +143,36 @@ export const NewCandidateArtifact = z.object({
 });
 export type NewCandidateArtifact = z.input<typeof NewCandidateArtifact>;
 
-/** Either author a new bridge artifact or nominate an existing one (cycle-checked). */
+/**
+ * Either author a new bridge artifact or nominate an existing one (cycle-checked).
+ * `transition` states the candidate's preconditions/effects/assumptions; it is stored as
+ * an `author` annotation of the candidate revision and drives the accept-time check.
+ */
 export const SubmitCandidateInput = z.union([
-	z.object({ artifact: NewCandidateArtifact, score: CandidateScore.optional() }),
-	z.object({ existingArtifactId: Uuid, score: CandidateScore.optional() })
+	z.object({
+		artifact: NewCandidateArtifact,
+		score: CandidateScore.optional(),
+		transition: Transition.optional()
+	}),
+	z.object({
+		existingArtifactId: Uuid,
+		score: CandidateScore.optional(),
+		transition: Transition.optional()
+	})
 ]);
 export type SubmitCandidateInput = z.input<typeof SubmitCandidateInput>;
 
-/** Requires `Idempotency-Key` header. */
+/**
+ * Requires `Idempotency-Key` header. Accept fails with `CONTINUITY_VIOLATION` when the
+ * candidate adds blocker issues to the committed path, unless a human supplies
+ * `acknowledgeIssues` (recorded in the revision reason and audit).
+ */
 export const AcceptExpansionInput = z.object({
 	candidateId: Uuid,
 	leftRelationType: RelationType.optional(),
 	rightRelationType: RelationType.optional(),
-	reason: Reason.optional()
+	reason: Reason.optional(),
+	acknowledgeIssues: z.string().trim().min(1).max(1000).optional()
 });
 export type AcceptExpansionInput = z.input<typeof AcceptExpansionInput>;
 
@@ -165,7 +183,11 @@ export const RejectExpansionInput = z.object({
 });
 export type RejectExpansionInput = z.input<typeof RejectExpansionInput>;
 
-export const CandidateWithArtifact = ExpansionCandidate.extend({ artifact: Artifact });
+export const CandidateWithArtifact = ExpansionCandidate.extend({
+	artifact: Artifact,
+	/** Issues this candidate would add to the committed path if accepted now. */
+	issues: z.array(ValidationIssue).default([])
+});
 export type CandidateWithArtifact = z.infer<typeof CandidateWithArtifact>;
 
 export const ExpansionDetail = z.object({
@@ -201,7 +223,9 @@ export const ProjectGraph = z.object({
 	expansions: z.array(Expansion),
 	candidates: z.array(ExpansionCandidate),
 	/** Head definitions of visible composites, filtered per member ACL. */
-	composites: z.array(CompositeSummary).default([])
+	composites: z.array(CompositeSummary).default([]),
+	/** Latest state annotation per visible artifact (continuity validation input). */
+	transitions: z.array(TransitionAnnotation).default([])
 });
 export type ProjectGraph = z.infer<typeof ProjectGraph>;
 
@@ -224,7 +248,9 @@ export const ExportBundle = z.object({
 	expansions: z.array(Expansion),
 	candidates: z.array(ExpansionCandidate),
 	/** Every composite definition revision (additive in v1; absent in older bundles). */
-	compositeDefinitions: z.array(CompositeDefinitionRecord).default([])
+	compositeDefinitions: z.array(CompositeDefinitionRecord).default([]),
+	/** Every state annotation (additive in v1). */
+	transitions: z.array(TransitionAnnotation).default([])
 });
 export type ExportBundle = z.infer<typeof ExportBundle>;
 

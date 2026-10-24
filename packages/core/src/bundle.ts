@@ -197,6 +197,15 @@ export function findBundleIntegrityIssues(bundle: ExportBundle): BundleIssue[] {
 			}
 		}
 	}
+	for (const t of bundle.transitions) {
+		if (revisionById.get(t.artifactRevisionId) !== t.artifactId) {
+			issues.push({
+				path: `transitions.${t.id}.artifactRevisionId`,
+				message: 'annotation revision mismatch',
+				ref: t.artifactRevisionId
+			});
+		}
+	}
 	return issues;
 }
 
@@ -286,6 +295,12 @@ export function remapBundleIds(
 					keyClaims: d.contract.keyClaims.map(claim)
 				}
 			};
-		})
+		}),
+		transitions: bundle.transitions.map((t) => ({
+			...t,
+			id: id(t.id),
+			artifactId: id(t.artifactId),
+			artifactRevisionId: id(t.artifactRevisionId)
+		}))
 	};
 }

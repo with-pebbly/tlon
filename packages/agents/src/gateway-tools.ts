@@ -8,7 +8,8 @@ import {
 	Disclosure,
 	ExpansionDetail,
 	ProjectGraph,
-	Relation
+	Relation,
+	TransitionAnnotation
 } from '../../contracts/src/index.ts';
 
 type Schema<T> = { parse(value: unknown): T };
@@ -79,13 +80,13 @@ const Kind = z.enum([
 	'NOTE'
 ]);
 
-const CreateParams = z.object({
+const createFields = {
 	kind: Kind,
 	title: z.string().min(1).max(300),
 	body: z.string().max(4000).describe('Markdown prose of the artifact'),
 	worldTime: z.string().max(200).optional().describe('When in story time this holds'),
 	location: z.string().max(200).optional()
-});
+};
 const RelationParams = z.object({
 	fromId: z.string(),
 	toId: z.string(),
@@ -96,6 +97,32 @@ const ExpansionParams = z.object({
 	leftArtifactId: z.string().optional(),
 	rightArtifactId: z.string().optional()
 });
+/** Wire shape of one state claim (mirrors contracts `Assertion`). */
+const AssertionParams = z.object({
+	subject: z.string().describe('lower_snake entity, e.g. mercury_bath'),
+	predicate: z.string().describe('lower_snake property, e.g. level'),
+	value: z
+		.union([z.string(), z.number(), z.boolean()])
+		.describe(
+			'short canonical token, 1–3 words, e.g. full / falling / open / on_crank — put detail in note'
+		),
+	note: z.string().optional().describe('free-text detail, never compared'),
+	epistemic: z.enum(['world', 'belief', 'rumor', 'hypothesis']).optional(),
+	holder: z.string().optional().describe('whose belief/rumor'),
+	irreversible: z.boolean().optional().describe('can only happen once (a valve drained)'),
+	preparation: z.boolean().optional().describe('readies an action a later beat must use')
+});
+const StateParams = {
+	preconditions: z
+		.array(AssertionParams)
+		.max(20)
+		.describe('world state that must already hold when this beat starts'),
+	effects: z.array(AssertionParams).max(20).describe('state this beat changes'),
+	inventedFacts: z
+		.array(AssertionParams)
+		.max(20)
+		.describe('new facts this beat invents to work (proposals until accepted)')
+};
 const CandidateParams = z.object({
 	expansionId: z.string(),
 	title: z.string().min(1).max(300),
@@ -103,7 +130,19 @@ const CandidateParams = z.object({
 	mechanism: z.string().min(1).max(2000),
 	assumptions: z.array(z.string().min(1).max(500)).min(1).max(10),
 	leftStaysTrue: z.string().min(1).max(1000),
-	rightStaysTrue: z.string().min(1).max(1000)
+	rightStaysTrue: z.string().min(1).max(1000),
+	...StateParams
+});
+/** Authors may state their beat's state contract too (optional; validated server-side). */
+const AuthorCreateParams = z.object({
+	...createFields,
+	preconditions: StateParams.preconditions.optional(),
+	effects: StateParams.effects.optional(),
+	inventedFacts: StateParams.inventedFacts.optional()
+});
+const StopParams = z.object({
+	relationId: z.string(),
+	reason: z.string().min(1).max(500)
 });
 const DisclosureParams = z.object({
 	destinationPrincipalId: z.string(),
@@ -127,8 +166,9 @@ function commonTools(gw: GatewayClient): CustomTool[] {
 			parameters: z.object({}),
 			async execute() {
 				const graph = await gw.call('GET', '/graph', ProjectGraph);
+				const state = new Map(graph.transitions.map((t) => [t.artifactId, t.transition]));
 				return text({
-					artifacts: graph.artifacts.map(brief),
+					artifacts: graph.artifacts.map((a) => ({ ...brief(a), state: state.get(a.id) ?? null })),
 					relations: graph.relations.map((r) => ({
 						id: r.id,
 						from: r.fromId,
@@ -148,10 +188,10 @@ function commonTools(gw: GatewayClient): CustomTool[] {
 			loadMode: 'essential',
 			approval: 'write',
 			description:
-				'Create one story artifact (a fact, event, scene, belief...). It is stored in your own scope automatically.',
-			parameters: CreateParams,
+				'Create one story artifact (a fact, event, scene, belief...). It is stored in your own scope automatically. Optionally state its world-state contract (preconditions/effects) so continuity can be checked.',
+			parameters: AuthorCreateParams,
 			async execute(_id, params) {
-				const p = CreateParams.parse(params);
+				const p = AuthorCreateParams.parse(params);
 				const structured: Record<string, string> = {};
 				if (p.worldTime) structured.worldTime = p.worldTime;
 				if (p.location) structured.location = p.location;
@@ -161,6 +201,17 @@ function commonTools(gw: GatewayClient): CustomTool[] {
 					body: p.body,
 					structured
 				});
+				if (p.preconditions?.length || p.effects?.length || p.inventedFacts?.length) {
+					await gw.call('PUT', `/artifacts/${created.id}/transition`, TransitionAnnotation, {
+						artifactRevisionId: created.headRevisionId,
+						source: 'author',
+						transition: {
+							preconditions: p.preconditions ?? [],
+							effects: p.effects ?? [],
+							assumptions: p.inventedFacts ?? []
+						}
+					});
+				}
 				return text(brief(created));
 			}
 		},
@@ -231,7 +282,7 @@ function bridgeTools(gw: GatewayClient): CustomTool[] {
 			loadMode: 'essential',
 			approval: 'write',
 			description:
-				'Submit a bridge C that makes both anchors true at once. State the mechanism, explicit assumptions and how each anchor stays true. A human reviews it.',
+				'Submit a bridge C that makes both anchors true at once. State the mechanism, explicit assumptions and how each anchor stays true, plus its state contract: preconditions must match the LEFT neighbour’s resulting state, effects must leave what the RIGHT neighbour requires, and never perform the right anchor’s own irreversible event. Validation runs before a human accepts.',
 			parameters: CandidateParams,
 			async execute(_id, params) {
 				const p = CandidateParams.parse(params);
@@ -249,6 +300,11 @@ function bridgeTools(gw: GatewayClient): CustomTool[] {
 								assumptions: p.assumptions,
 								anchorReconciliation: { left: p.leftStaysTrue, right: p.rightStaysTrue }
 							}
+						},
+						transition: {
+							preconditions: p.preconditions,
+							effects: p.effects,
+							assumptions: p.inventedFacts
 						}
 					}
 				);
@@ -256,7 +312,14 @@ function bridgeTools(gw: GatewayClient): CustomTool[] {
 				return text({
 					candidateId: last?.id,
 					artifactId: last?.artifactId,
-					status: 'awaiting human review'
+					status: 'awaiting review',
+					// Continuity issues this candidate would add; blockers must be fixed by a new candidate.
+					issues:
+						last?.issues.map((i) => ({
+							kind: i.kind,
+							severity: i.severity,
+							explanation: i.explanation
+						})) ?? []
 				});
 			}
 		},
@@ -281,6 +344,32 @@ function bridgeTools(gw: GatewayClient): CustomTool[] {
 	];
 }
 
-export function toolsForRole(role: AgentRole, gw: GatewayClient): CustomTool[] {
-	return role === 'C' ? [...commonTools(gw), ...bridgeTools(gw)] : commonTools(gw);
+export type ToolHooks = {
+	/** Called when C judges an interval sufficiently detailed (run-scoped STOP). */
+	onStop?: (relationId: string, reason: string) => void;
+};
+
+function stopTool(hooks: ToolHooks): CustomTool {
+	return {
+		name: 'interval_stop',
+		label: 'Stop expanding interval',
+		loadMode: 'essential',
+		approval: 'read',
+		description:
+			'Declare an interval sufficiently detailed instead of bridging it: use when a new beat would only restate motions, delay an established outcome, or add no new causal information, character choice or reversal. This is a successful outcome, not a failure.',
+		parameters: StopParams,
+		async execute(_id, params) {
+			const p = StopParams.parse(params);
+			hooks.onStop?.(p.relationId, p.reason);
+			return text({ relationId: p.relationId, status: 'stopped: sufficient detail' });
+		}
+	};
+}
+
+export function toolsForRole(
+	role: AgentRole,
+	gw: GatewayClient,
+	hooks: ToolHooks = {}
+): CustomTool[] {
+	return role === 'C' ? [...commonTools(gw), ...bridgeTools(gw), stopTool(hooks)] : commonTools(gw);
 }

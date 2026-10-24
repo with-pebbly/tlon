@@ -13,9 +13,11 @@ import { findBundleIntegrityIssues, remapBundleIds } from '@tlon/core';
 import { asc, count, eq, inArray } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 
+import { insertImportedDefinitions, loadCompositeDefinitions } from './composites.ts';
 import type { Db } from './db.ts';
 import { assertAllowed, audit, authorize, chunk, parseInput, type Ctx } from './internal.ts';
 import {
+	loadAllAnnotations,
 	loadCandidates,
 	loadExpansions,
 	loadRelations,
@@ -26,11 +28,13 @@ import {
 import {
 	artifactRevisions,
 	artifacts,
+	compositeDefinitions,
 	expansionCandidates,
 	expansions,
 	members,
 	projects,
-	relations
+	relations,
+	transitionAnnotations
 } from './schema.ts';
 
 const INSERT_CHUNK = 500;
@@ -97,7 +101,8 @@ export function bundleMethods(ctx: Ctx) {
 					...parsed,
 					artifacts: parsed.artifacts.map((a) => ({ ...a, projectId })),
 					relations: parsed.relations.map((r) => ({ ...r, projectId })),
-					expansions: parsed.expansions.map((e) => ({ ...e, projectId }))
+					expansions: parsed.expansions.map((e) => ({ ...e, projectId })),
+					compositeDefinitions: parsed.compositeDefinitions
 				};
 
 		if (!remapIds) {
@@ -107,10 +112,22 @@ export function bundleMethods(ctx: Ctx) {
 				['relations', relations, relations.id, data.relations.map((r) => r.id)],
 				['expansions', expansions, expansions.id, data.expansions.map((e) => e.id)],
 				[
+					'compositeDefinitions',
+					compositeDefinitions,
+					compositeDefinitions.id,
+					data.compositeDefinitions.map((d) => d.id)
+				],
+				[
 					'candidates',
 					expansionCandidates,
 					expansionCandidates.id,
 					data.candidates.map((c) => c.id)
+				],
+				[
+					'transitions',
+					transitionAnnotations,
+					transitionAnnotations.id,
+					data.transitions.map((t) => t.id)
 				]
 			];
 			for (const [entity, table, column, ids] of checks) {
@@ -134,6 +151,7 @@ export function bundleMethods(ctx: Ctx) {
 					id: a.id,
 					projectId,
 					kind: a.kind,
+					composition: a.composition,
 					title: a.title,
 					body: a.body,
 					structured: a.structured,
@@ -158,6 +176,21 @@ export function bundleMethods(ctx: Ctx) {
 					actorId: r.actorId,
 					reason: r.reason,
 					createdAt: new Date(r.createdAt)
+				}))
+			);
+		}
+		for (const part of chunk(data.transitions, INSERT_CHUNK)) {
+			await tx.insert(transitionAnnotations).values(
+				part.map((t) => ({
+					id: t.id,
+					projectId,
+					artifactId: t.artifactId,
+					artifactRevisionId: t.artifactRevisionId,
+					transition: t.transition,
+					source: t.source,
+					reviewed: t.reviewed,
+					actorId: t.actorId,
+					createdAt: new Date(t.createdAt)
 				}))
 			);
 		}
@@ -213,6 +246,7 @@ export function bundleMethods(ctx: Ctx) {
 				}))
 			);
 		}
+		await insertImportedDefinitions(tx, projectId, data.compositeDefinitions);
 		await tx
 			.update(projects)
 			.set({ settings: parsed.project.settings, updatedAt: ctx.now() })
@@ -263,7 +297,14 @@ export function bundleMethods(ctx: Ctx) {
 				revisions,
 				relations: relationList,
 				expansions: expansionList,
-				candidates: candidateList
+				candidates: candidateList,
+				compositeDefinitions: await loadCompositeDefinitions(
+					db,
+					projectId,
+					artifactList,
+					relationList
+				),
+				transitions: await loadAllAnnotations(ctx, db, principal, projectId)
 			};
 		},
 

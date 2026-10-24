@@ -336,7 +336,8 @@ describe('export bundles', () => {
 				reviewStatus: 'SELECTED' as const,
 				createdAt: at
 			})),
-			compositeDefinitions: []
+			compositeDefinitions: [],
+			transitions: []
 		};
 	}
 

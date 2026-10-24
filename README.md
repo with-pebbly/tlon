@@ -93,6 +93,39 @@ REST under `/api`, contracts in `packages/contracts/src/api.ts`. Edits use
 `{ "error": { "code", "message", "details?" } }` with codes in
 `packages/contracts/src/errors.ts`.
 
+Composite artifacts (ADR 0009) live under `/api/projects/:projectId/composites`:
+`POST /composites` (compose a selection → `CompositeView`, 201),
+`GET /composites/:id?depth=N` (recursive open, members/relations/claims filtered per
+caller), `POST /composites/:id/revisions` (new definition version; requires
+`expectedDefinitionVersion`, `STALE_DEFINITION` 409 otherwise),
+`GET /composites/:id/revisions` and `POST /composites/:id/archive` (`{ reason? }`).
+Bridges between composites (`Bridge(M, N)`) and expanding any relation reuse the
+existing `POST /expansions` endpoint — there are no separate `/bridges` or
+`/relations/:id/expand` routes. `GET /graph` adds `composites` and per-expansion
+`staleSides`; the export bundle carries `compositeDefinitions`.
+
+Continuity validation (`docs/GENERATION_REVIEW.md`) stores per-beat state contracts as
+append-only **transition annotations** beside the artifact, so annotating an anchor never
+creates a revision or stales its bridges:
+
+- `PUT /artifacts/:id/transition` (`{ artifactRevisionId, transition, source?, reviewed? }`
+  → `TransitionAnnotation`, 201). `artifactRevisionId` must be the head revision
+  (`STALE_REVISION` 409); agents write only inside their own scope; the VALIDATOR cannot.
+  `GET /graph` and the export bundle carry `transitions` (latest per visible artifact /
+  full history).
+- `POST /expansions/:id/candidates` accepts an optional `transition`, stored as an `author`
+  annotation of the candidate's revision; each candidate in `ExpansionDetail` lists the
+  `issues` it would add to the committed path (computed on the caller-visible graph; only
+  for roles with `validation.read`: human, C, VALIDATOR).
+- `POST /expansions/:id/accept` refuses with `CONTINUITY_VIOLATION` 409
+  (`details.issues`: `key`, `kind`, `severity`, `artifactIds`, `stateKey` — no prose) when
+  the candidate adds non-dismissed blocker issues. Only a human can proceed, by sending
+  `acknowledgeIssues` (text); the acknowledgement is recorded in the bridge revision reason
+  and the audit event (issue keys only). Idempotent replays never re-run the gate.
+- `GET /issues` → `IssueList` (human, C, VALIDATOR); `POST /issues/dismiss`
+  (`{ key, resolution, reason }`, human only) records a resolution that sticks to the
+  stable issue key across recomputation and returns the updated list.
+
 ## Decisions
 
 See [docs/adr](docs/adr): stack (SvelteKit/Fastify/Node native TS), PostgreSQL +

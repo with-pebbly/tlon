@@ -46,6 +46,7 @@ export const artifacts = pgTable(
 			.notNull()
 			.references(() => projects.id),
 		kind: text('kind').notNull(),
+		composition: text('composition').notNull().default('ATOMIC'),
 		title: text('title').notNull(),
 		body: text('body').notNull(),
 		structured: jsonb('structured').$type<Record<string, unknown>>().notNull(),
@@ -307,6 +308,131 @@ export const disclosures = pgTable(
 	]
 );
 
+/**
+ * One row per composite definition revision (the head is the max `version`). Definitions
+ * pin member revisions; the composite artifact's own revision chain lives in
+ * `artifact_revisions` as for any artifact.
+ */
+export const compositeDefinitions = pgTable(
+	'composite_definitions',
+	{
+		id: uuid('id').primaryKey(),
+		projectId: uuid('project_id')
+			.notNull()
+			.references(() => projects.id),
+		compositeArtifactId: uuid('composite_artifact_id').notNull(),
+		artifactRevisionId: uuid('artifact_revision_id')
+			.notNull()
+			.references(() => artifactRevisions.id),
+		version: integer('version').notNull(),
+		contract: jsonb('contract').$type<Record<string, unknown>>().notNull(),
+		boundary: jsonb('boundary').$type<{ entries: string[]; exits: string[] }>().notNull(),
+		actorId: text('actor_id').notNull(),
+		reason: text('reason'),
+		createdAt: ts('created_at').notNull()
+	},
+	(t) => [
+		foreignKey({
+			name: 'composite_definitions_artifact_fk',
+			columns: [t.projectId, t.compositeArtifactId],
+			foreignColumns: [artifacts.projectId, artifacts.id]
+		}),
+		unique('composite_definitions_artifact_version_uq').on(t.compositeArtifactId, t.version),
+		index('composite_definitions_project_idx').on(t.projectId),
+		index('composite_definitions_composite_idx').on(t.compositeArtifactId)
+	]
+);
+
+/** Members of one definition with the revision pinned at definition time. */
+export const compositeMembers = pgTable(
+	'composite_members',
+	{
+		definitionId: uuid('definition_id')
+			.notNull()
+			.references(() => compositeDefinitions.id),
+		memberArtifactId: uuid('member_artifact_id')
+			.notNull()
+			.references(() => artifacts.id),
+		memberRevisionId: uuid('member_revision_id')
+			.notNull()
+			.references(() => artifactRevisions.id),
+		displayOrder: integer('display_order').notNull()
+	},
+	(t) => [
+		primaryKey({ columns: [t.definitionId, t.memberArtifactId] }),
+		index('composite_members_member_idx').on(t.memberArtifactId)
+	]
+);
+
+/** Internal relations snapshotted into a definition; endpoints must both be members (service-enforced). */
+export const compositeRelationMembers = pgTable(
+	'composite_relation_members',
+	{
+		definitionId: uuid('definition_id')
+			.notNull()
+			.references(() => compositeDefinitions.id),
+		relationId: uuid('relation_id')
+			.notNull()
+			.references(() => relations.id)
+	},
+	(t) => [
+		primaryKey({ columns: [t.definitionId, t.relationId] }),
+		index('composite_relation_members_relation_idx').on(t.relationId)
+	]
+);
+
+/**
+ * Append-only state-contract annotations (preconditions/effects/assumptions) of one exact
+ * artifact revision. Kept beside the artifact so annotating never creates a revision;
+ * the latest row per artifact is the current annotation.
+ */
+export const transitionAnnotations = pgTable(
+	'transition_annotations',
+	{
+		id: uuid('id').primaryKey(),
+		projectId: uuid('project_id')
+			.notNull()
+			.references(() => projects.id),
+		artifactId: uuid('artifact_id').notNull(),
+		artifactRevisionId: uuid('artifact_revision_id')
+			.notNull()
+			.references(() => artifactRevisions.id),
+		transition: jsonb('transition').$type<Record<string, unknown>>().notNull(),
+		source: text('source').notNull(),
+		reviewed: boolean('reviewed').notNull(),
+		actorId: text('actor_id').notNull(),
+		createdAt: ts('created_at').notNull()
+	},
+	(t) => [
+		foreignKey({
+			name: 'transition_annotations_artifact_fk',
+			columns: [t.projectId, t.artifactId],
+			foreignColumns: [artifacts.projectId, artifacts.id]
+		}),
+		index('transition_annotations_artifact_idx').on(t.artifactId, t.createdAt)
+	]
+);
+
+/** Human resolutions of validation issues, keyed by the stable issue key; the latest row per key wins. */
+export const issueDismissals = pgTable(
+	'issue_dismissals',
+	{
+		id: uuid('id').primaryKey(),
+		projectId: uuid('project_id')
+			.notNull()
+			.references(() => projects.id),
+		issueKey: text('issue_key').notNull(),
+		resolution: text('resolution').notNull(),
+		reason: text('reason').notNull(),
+		actorId: text('actor_id').notNull(),
+		createdAt: ts('created_at').notNull()
+	},
+	(t) => [index('issue_dismissals_project_key_idx').on(t.projectId, t.issueKey)]
+);
+
+export type CompositeDefinitionRow = typeof compositeDefinitions.$inferSelect;
+export type CompositeMemberRow = typeof compositeMembers.$inferSelect;
+
 export type ProjectRow = typeof projects.$inferSelect;
 export type ArtifactRow = typeof artifacts.$inferSelect;
 export type RevisionRow = typeof artifactRevisions.$inferSelect;
@@ -316,3 +442,5 @@ export type CandidateRow = typeof expansionCandidates.$inferSelect;
 export type AgentPrincipalRow = typeof agentPrincipals.$inferSelect;
 export type GrantRow = typeof grants.$inferSelect;
 export type DisclosureRow = typeof disclosures.$inferSelect;
+export type TransitionAnnotationRow = typeof transitionAnnotations.$inferSelect;
+export type IssueDismissalRow = typeof issueDismissals.$inferSelect;

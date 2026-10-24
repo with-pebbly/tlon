@@ -202,6 +202,62 @@ export function buildApp({ service, logger }: BuildAppOptions): FastifyInstance 
 	app.get<ItemParams>(`${project}/artifacts/:id/revisions`, async (request) =>
 		service.listRevisions(await act(request), request.params.projectId, request.params.id)
 	);
+	app.put<ItemParams>(`${project}/artifacts/:id/transition`, async (request, reply) => {
+		const annotation = await service.putTransition(
+			await act(request),
+			request.params.projectId,
+			request.params.id,
+			request.body
+		);
+		return reply.code(201).send(annotation);
+	});
+
+	app.get<ProjectParams>(`${project}/issues`, async (request) =>
+		service.listIssues(await act(request), request.params.projectId)
+	);
+	app.post<ProjectParams>(`${project}/issues/dismiss`, async (request) =>
+		service.dismissIssue(await act(request), request.params.projectId, request.body)
+	);
+
+	app.post<ProjectParams>(`${project}/composites`, async (request, reply) => {
+		const created = await service.createComposite(
+			await act(request),
+			request.params.projectId,
+			request.body
+		);
+		return reply.code(201).send(created);
+	});
+	app.get<ItemParams & { Querystring: { depth?: string } }>(
+		`${project}/composites/:id`,
+		async (request) =>
+			service.getComposite(
+				await act(request),
+				request.params.projectId,
+				request.params.id,
+				request.query
+			)
+	);
+	app.post<ItemParams>(`${project}/composites/:id/revisions`, async (request, reply) => {
+		const revised = await service.reviseComposite(
+			await act(request),
+			request.params.projectId,
+			request.params.id,
+			request.body
+		);
+		return reply.code(201).send(revised);
+	});
+	app.get<ItemParams>(`${project}/composites/:id/revisions`, async (request) =>
+		service.listCompositeRevisions(await act(request), request.params.projectId, request.params.id)
+	);
+	app.post<ItemParams>(`${project}/composites/:id/archive`, async (request) => {
+		const body = request.body as { reason?: unknown } | undefined;
+		return service.archiveComposite(
+			await act(request),
+			request.params.projectId,
+			request.params.id,
+			typeof body?.reason === 'string' ? body.reason : undefined
+		);
+	});
 
 	app.post<ProjectParams>(`${project}/relations`, async (request, reply) => {
 		const created = await service.createRelation(

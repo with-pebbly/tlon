@@ -1,9 +1,12 @@
 import {
+	type IssueList,
 	type AcceptExpansionResult,
 	type AgentList,
 	type AgentPrincipal,
 	type Artifact,
 	type ArtifactPage,
+	type CompositeRevisionList,
+	type CompositeView,
 	type AuditPage,
 	type Disclosure,
 	type DisclosureList,
@@ -19,6 +22,7 @@ import {
 	type ProjectList,
 	type Relation,
 	type RevisionList,
+	type TransitionAnnotation,
 	TlonError,
 	Uuid,
 	type WhoAmI
@@ -27,6 +31,7 @@ import { eq } from 'drizzle-orm';
 
 import { artifactMethods } from './artifacts.ts';
 import { bundleMethods } from './bundle.ts';
+import { compositeMethods } from './composites.ts';
 import type { Db } from './db.ts';
 import { expansionMethods } from './expansions.ts';
 import { gatewayMethods } from './gateway.ts';
@@ -34,6 +39,7 @@ import { auditDecision, createCtx, type Ctx, type ServiceOptions } from './inter
 import { projectMethods } from './projects.ts';
 import { relationMethods } from './relations.ts';
 import { projects } from './schema.ts';
+import { validationMethods } from './validation.ts';
 
 /**
  * The single domain service shared by API and CLI. Every method takes the acting
@@ -67,6 +73,42 @@ export interface TlonService {
 		input: unknown
 	): Promise<Artifact>;
 	listRevisions(principal: Principal, projectId: string, id: string): Promise<RevisionList>;
+
+	/** Appends a state-contract annotation to the artifact's head revision (never creates a revision). */
+	putTransition(
+		principal: Principal,
+		projectId: string,
+		artifactId: string,
+		input: unknown
+	): Promise<TransitionAnnotation>;
+	listIssues(principal: Principal, projectId: string): Promise<IssueList>;
+	dismissIssue(principal: Principal, projectId: string, input: unknown): Promise<IssueList>;
+
+	createComposite(principal: Principal, projectId: string, input: unknown): Promise<CompositeView>;
+	/** `query` = `{ depth }` (default 1). Hidden members/relations/claims are omitted for the caller. */
+	getComposite(
+		principal: Principal,
+		projectId: string,
+		id: string,
+		query?: unknown
+	): Promise<CompositeView>;
+	reviseComposite(
+		principal: Principal,
+		projectId: string,
+		id: string,
+		input: unknown
+	): Promise<CompositeView>;
+	listCompositeRevisions(
+		principal: Principal,
+		projectId: string,
+		id: string
+	): Promise<CompositeRevisionList>;
+	archiveComposite(
+		principal: Principal,
+		projectId: string,
+		id: string,
+		reason?: string
+	): Promise<Artifact>;
 
 	createRelation(principal: Principal, projectId: string, input: unknown): Promise<Relation>;
 	updateRelation(
@@ -214,9 +256,11 @@ export function createTlonService(db: Db, options: ServiceOptions = {}): TlonSer
 	const methods = {
 		...projectMethods(ctx),
 		...artifactMethods(ctx),
+		...compositeMethods(ctx),
 		...relationMethods(ctx),
 		...expansionMethods(ctx),
 		...bundleMethods(ctx),
+		...validationMethods(ctx),
 		...gatewayMethods(ctx)
 	};
 	const audited: Record<string, unknown> = {};

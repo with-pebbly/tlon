@@ -15,6 +15,20 @@
       "when": 1792856352615,
       "tag": "0001_slim_masked_marvel",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792864504726,
+      "tag": "0002_rich_paibok",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1792865491561,
+      "tag": "0003_lethal_fat_cobra",
+      "breakpoints": true
     }
   ]
 }
