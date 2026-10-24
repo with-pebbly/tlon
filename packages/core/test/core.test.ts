@@ -4,6 +4,12 @@ import { describe, expect, it } from 'vitest';
 import {
 	acceptanceFingerprint,
 	assertCandidateArtifactAllowed,
+	assertNoMembershipCycle,
+	collapseComposites,
+	compositionWarnings,
+	inferBoundary,
+	membershipIndex,
+	transitiveMembers,
 	assertDepthWithinLimit,
 	assertRelationAcyclic,
 	buildFractalTree,
@@ -266,6 +272,7 @@ describe('export bundles', () => {
 					version: 1,
 					snapshot: {
 						kind: a.kind,
+						composition: a.composition,
 						title: a.title,
 						body: a.body,
 						structured: a.structured,
@@ -285,6 +292,7 @@ describe('export bundles', () => {
 						version: 1,
 						snapshot: {
 							kind: 'FACT' as const,
+							composition: 'ATOMIC' as const,
 							title: '',
 							body: '',
 							structured: {},
@@ -303,6 +311,7 @@ describe('export bundles', () => {
 						version: 1,
 						snapshot: {
 							kind: 'FACT' as const,
+							composition: 'ATOMIC' as const,
 							title: '',
 							body: '',
 							structured: {},
@@ -326,7 +335,8 @@ describe('export bundles', () => {
 				score: { validation: [] },
 				reviewStatus: 'SELECTED' as const,
 				createdAt: at
-			}))
+			})),
+			compositeDefinitions: []
 		};
 	}
 
@@ -421,3 +431,99 @@ function bundleProject(graph: MiniGraph) {
 		updatedAt: at
 	};
 }
+
+describe('composites (core)', () => {
+	const summary = (
+		artifactId: string,
+		members: string[],
+		entries = [members[0]!],
+		exits = [members.at(-1)!]
+	) => ({
+		artifactId,
+		definitionId: nextId(),
+		version: 1,
+		memberArtifactIds: members,
+		memberRelationIds: [],
+		boundary: { entries, exits },
+		externalRelationIds: []
+	});
+
+	it('rejects direct and transitive self-membership, allows DAG reuse', () => {
+		const index = membershipIndex([summary('M', ['a', 'b']), summary('P', ['M', 'c'])]);
+		expect(codeOf(() => assertNoMembershipCycle('M', ['a', 'P'], index))).toBe('MEMBERSHIP_CYCLE');
+		expect(codeOf(() => assertNoMembershipCycle('M', ['M'], index))).toBe('MEMBERSHIP_CYCLE');
+		expect(codeOf(() => assertNoMembershipCycle('N', ['a', 'b'], index))).toBe('NO_THROW');
+		expect([...transitiveMembers('P', index)].sort()).toEqual(['M', 'a', 'b', 'c']);
+	});
+
+	it('infers entries/exits from internal edges and warns about disconnected selections', () => {
+		const internal = [
+			{ fromId: 'a', toId: 'b' },
+			{ fromId: 'b', toId: 'c' }
+		];
+		expect(inferBoundary(['a', 'b', 'c'], internal)).toEqual({ entries: ['a'], exits: ['c'] });
+		expect(compositionWarnings(['a', 'b', 'x'], internal.slice(0, 1), 0)).toHaveLength(1);
+		expect(compositionWarnings(['a', 'b', 'c'], internal, 2)).toEqual([
+			expect.stringContaining('2 external')
+		]);
+	});
+
+	function chainWithComposites() {
+		const [a1, a2, a3, b1, b2] = ['a1', 'a2', 'a3', 'b1', 'b2'].map((t) => artifact(t));
+		const M = artifact('M', { kind: 'ARC', composition: 'COMPOSITE' });
+		const N = artifact('N', { kind: 'ARC', composition: 'COMPOSITE' });
+		const x = artifact('outsider');
+		const relations = [
+			relation(a1!.id, a2!.id, { type: 'precedes' }),
+			relation(a2!.id, a3!.id, { type: 'precedes' }),
+			relation(b1!.id, b2!.id, { type: 'precedes' }),
+			relation(x.id, a2!.id, { type: 'causes' }),
+			relation(M.id, N.id, { type: 'precedes' })
+		];
+		const composites = [
+			summary(M.id, [a1!.id, a2!.id, a3!.id], [a1!.id], [a3!.id]),
+			summary(N.id, [b1!.id, b2!.id], [b1!.id], [b2!.id])
+		];
+		const graph = {
+			artifacts: [a1!, a2!, a3!, b1!, b2!, M, N, x],
+			relations,
+			expansions: [] as MiniGraph['expansions'],
+			composites
+		};
+		return { graph, a1: a1!, a3: a3!, b1: b1!, M, N, x, root: relations[4]! };
+	}
+
+	it('collapse hides members and stands in for boundary relations with aggregated edges only', () => {
+		const { graph, M, N, x } = chainWithComposites();
+		const collapsed = collapseComposites(graph, new Set());
+		expect(collapsed.artifacts.map((a) => a.title).sort()).toEqual(['M', 'N', 'outsider']);
+		expect(collapsed.relations.map((r) => [r.fromId, r.toId])).toEqual([[M.id, N.id]]);
+		expect(collapsed.aggregatedEdges).toEqual([
+			expect.objectContaining({ fromId: x.id, toId: M.id })
+		]);
+		const opened = collapseComposites(graph, new Set([M.id, N.id]));
+		expect(opened.artifacts).toHaveLength(8);
+		expect(opened.aggregatedEdges).toEqual([]);
+	});
+
+	it('a bridge between open composites lands between M’s exit and N’s entry, and reads in order', () => {
+		const { graph, a3, b1, root, M, N } = chainWithComposites();
+		const mini: MiniGraph = {
+			artifacts: graph.artifacts,
+			relations: graph.relations,
+			expansions: []
+		};
+		acceptBridge(mini, root, 'C');
+		const full = { ...mini, composites: graph.composites };
+		const layout = layoutPyramid(collapseComposites(full, new Set([M.id, N.id])));
+		const at = new Map(layout.nodes.map((n) => [n.artifactId, n]));
+		const c = layout.nodes.find((n) => n.role === 'bridge')!;
+		expect(c.x).toBe((at.get(a3.id)!.x + at.get(b1.id)!.x) / 2);
+		expect(at.has(M.id)).toBe(false);
+		expect(layout.frames.map((f) => f.compositeId).sort()).toEqual([M.id, N.id].sort());
+		const project = bundleProject(mini);
+		const titles = storyBeats({ ...full, project }).map((b) => b.artifact.title);
+		// outsider causes a2, so it precedes a2 on the line.
+		expect(titles).toEqual(['a1', 'outsider', 'a2', 'a3', 'C', 'b1', 'b2']);
+	});
+});

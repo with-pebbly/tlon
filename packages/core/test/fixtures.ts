@@ -13,6 +13,7 @@ export function artifact(title: string, patch: Partial<Artifact> = {}): Artifact
 		id,
 		projectId: uuid(1),
 		kind: 'FACT',
+		composition: 'ATOMIC',
 		title,
 		body: '',
 		structured: {},
@@ -78,7 +79,8 @@ export function acceptBridge(
 		childRelationIds: [],
 		createdAt: at,
 		updatedAt: at,
-		acceptedAt: at
+		acceptedAt: at,
+		staleSides: []
 	};
 	// Insert right child first to prove ordering does not depend on insertion order.
 	const right = relation(bridge.id, target.toId, { type: 'bridges', expansionId: expansion.id });

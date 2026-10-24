@@ -4,6 +4,7 @@ import {
 	ArtifactKind,
 	ArtifactStatus,
 	CandidateReviewStatus,
+	Composition,
 	ExpansionStatus,
 	OwnerScope,
 	ProjectDomain,
@@ -44,6 +45,8 @@ export const Artifact = z.object({
 	id: Uuid,
 	projectId: Uuid,
 	kind: ArtifactKind,
+	/** ATOMIC unless the artifact is a composite (default keeps v1 bundles importable). */
+	composition: Composition.default('ATOMIC'),
 	title: z.string(),
 	body: z.string(),
 	structured: StructuredRecord,
@@ -62,6 +65,7 @@ export type Artifact = z.infer<typeof Artifact>;
 /** Full immutable snapshot stored in every revision (append-only history). */
 export const ArtifactSnapshot = z.object({
 	kind: ArtifactKind,
+	composition: Composition.default('ATOMIC'),
 	title: z.string(),
 	body: z.string(),
 	structured: StructuredRecord,
@@ -135,7 +139,13 @@ export const Expansion = z.object({
 	childRelationIds: z.array(Uuid),
 	createdAt: IsoDate,
 	updatedAt: IsoDate,
-	acceptedAt: IsoDate.nullable()
+	acceptedAt: IsoDate.nullable(),
+	/**
+	 * Derived: anchors whose head revision moved past the pinned one after acceptance
+	 * (for composites: a new interface revision). The bridge is kept, never rewritten;
+	 * the flag tells reviewers it may no longer reconcile the current text.
+	 */
+	staleSides: z.array(z.enum(['left', 'right'])).default([])
 });
 export type Expansion = z.infer<typeof Expansion>;
 

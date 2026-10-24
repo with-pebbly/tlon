@@ -24,10 +24,21 @@ export const ARTIFACT_STATUSES = [
 	'PROPOSED',
 	'ACCEPTED',
 	'REJECTED',
-	'SUPERSEDED'
+	'SUPERSEDED',
+	/** Retired composite (or artifact): kept with full history, members untouched. */
+	'ARCHIVED'
 ] as const;
 export const ArtifactStatus = z.enum(ARTIFACT_STATUSES);
 export type ArtifactStatus = z.infer<typeof ArtifactStatus>;
+
+/**
+ * Atomic artifacts carry their own content; composite artifacts are a versioned
+ * semantic composition over a subgraph (COMPOSITE_ARTIFACTS_SPEC). Orthogonal to
+ * `kind`, which stays the narrative label (a composite is typically SCENE/ARC).
+ */
+export const COMPOSITIONS = ['ATOMIC', 'COMPOSITE'] as const;
+export const Composition = z.enum(COMPOSITIONS);
+export type Composition = z.infer<typeof Composition>;
 
 export const OWNER_SCOPES = ['A_PRIVATE', 'B_PRIVATE', 'C_SHARED', 'PROJECT_PUBLIC'] as const;
 export const OwnerScope = z.enum(OWNER_SCOPES);
@@ -109,7 +120,16 @@ export const ACYCLIC_RELATION_TYPES: readonly string[] = ['precedes', 'derived_f
 /** Type used for A→C and C→B child relations when the accept request does not override it. */
 export const DEFAULT_CHILD_RELATION_TYPE = 'bridges';
 
+/**
+ * Membership lives only in composite definitions; semantic relations may never use
+ * these names, so `contains` can't be confused with `causes`/`precedes` (spec §2.1).
+ */
+export const RESERVED_RELATION_TYPES: readonly string[] = ['contains', 'member_of', 'part_of'];
+
 export const RelationType = z
 	.string()
-	.regex(/^[a-z][a-z0-9_]{0,63}$/, 'relation type must be snake_case, 1-64 chars');
+	.regex(/^[a-z][a-z0-9_]{0,63}$/, 'relation type must be snake_case, 1-64 chars')
+	.refine((t) => !RESERVED_RELATION_TYPES.includes(t), {
+		message: 'membership types are reserved; compose artifacts instead'
+	});
 export type RelationType = z.infer<typeof RelationType>;

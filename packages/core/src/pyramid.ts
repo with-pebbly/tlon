@@ -1,6 +1,19 @@
-import type { Artifact, Expansion, ProjectGraph, Relation } from '@tlon/contracts';
+import type {
+	Artifact,
+	CompositeSummary,
+	Expansion,
+	ProjectGraph,
+	Relation
+} from '@tlon/contracts';
 
-type GraphLike = Pick<ProjectGraph, 'artifacts' | 'relations' | 'expansions'>;
+type GraphLike = Pick<ProjectGraph, 'artifacts' | 'relations' | 'expansions'> & {
+	/** Head composite definitions (graph projection); open composites are those with visible members. */
+	composites?: readonly CompositeSummary[];
+	/** From `collapseComposites`: hidden member → visible collapsed composite. */
+	representative?: ReadonlyMap<string, string>;
+};
+
+type OrderEdge = Pick<Relation, 'fromId' | 'toId' | 'expansionId' | 'status' | 'type'>;
 
 export type PyramidNode = {
 	artifactId: string;
@@ -25,6 +38,8 @@ export type PyramidTriangle = {
 export type PyramidLayout = {
 	nodes: PyramidNode[];
 	triangles: PyramidTriangle[];
+	/** Bounding boxes (grid units) of OPEN composites around their visible members. */
+	frames: Array<{ compositeId: string; minX: number; maxX: number; minY: number; maxY: number }>;
 	/** Grid width/height in units; renderers scale by their cell size. */
 	width: number;
 	height: number;
@@ -39,7 +54,7 @@ const BASE_GAP = 2;
  * expansion, not rejected) as "left of" edges; ties and cycles fall back to creation
  * order. `contradicts` edges carry no order.
  */
-function orderBase(base: readonly Artifact[], relations: readonly Relation[]): Artifact[] {
+function orderBase(base: readonly Artifact[], relations: readonly OrderEdge[]): Artifact[] {
 	const byId = new Map(base.map((a) => [a.id, a]));
 	const out = new Map<string, string[]>();
 	const indegree = new Map(base.map((a) => [a.id, 0]));
@@ -92,11 +107,47 @@ export function layoutPyramid(graph: GraphLike): PyramidLayout {
 	const bridgeIds = new Set(accepted.map((e) => e.selectedBridgeArtifactId as string));
 	const candidateIds = new Set(open.flatMap((e) => e.bridgeArtifactIds));
 
-	const base = [...artifactsById.values()].filter(
-		(a) => !bridgeIds.has(a.id) && !candidateIds.has(a.id)
+	// An OPEN composite is drawn as its members (plus a frame); anything anchored on it
+	// attaches to its boundary: a left anchor resolves to its exits, a right anchor to
+	// its entries — a bridge between M and N sits between M's exit and N's entry.
+	const openComposites = new Map(
+		(graph.composites ?? [])
+			.filter(
+				(c) =>
+					artifactsById.has(c.artifactId) && c.memberArtifactIds.some((m) => artifactsById.has(m))
+			)
+			.map((c) => [c.artifactId, c])
 	);
-	const ordered = orderBase(base, graph.relations);
+	const endpoints = (id: string, side: 'from' | 'to', seen = new Set<string>()): string[] => {
+		const viaRep = graph.representative?.get(id);
+		if (viaRep !== undefined && viaRep !== id) return endpoints(viaRep, side, seen);
+		const composite = openComposites.get(id);
+		if (!composite || seen.has(id)) return [id];
+		seen.add(id);
+		const visible = (ids: readonly string[]) =>
+			ids.filter((m) => artifactsById.has(m) || openComposites.has(m));
+		const ports = visible(side === 'from' ? composite.boundary.exits : composite.boundary.entries);
+		const fallback = visible(composite.memberArtifactIds);
+		return (ports.length > 0 ? ports : fallback).flatMap((m) => endpoints(m, side, seen));
+	};
+
+	const base = [...artifactsById.values()].filter(
+		(a) => !bridgeIds.has(a.id) && !candidateIds.has(a.id) && !openComposites.has(a.id)
+	);
+	const orderEdges: OrderEdge[] = graph.relations.flatMap((r) =>
+		endpoints(r.fromId, 'from').flatMap((fromId) =>
+			endpoints(r.toId, 'to').map((toId) => ({ ...r, fromId, toId }))
+		)
+	);
+	const ordered = orderBase(base, orderEdges);
 	const baseIndex = new Map(ordered.map((a, i) => [a.id, i]));
+	const indexOf = (id: string, side: 'left' | 'right') => {
+		const found = endpoints(id, side === 'left' ? 'from' : 'to')
+			.map((m) => baseIndex.get(m))
+			.filter((i): i is number => i !== undefined);
+		if (found.length === 0) return undefined;
+		return side === 'left' ? Math.max(...found) : Math.min(...found);
+	};
 
 	// Height of each expansion tree: the apex row of a root expansion equals the depth of
 	// its deepest descendant, so finer bridges sit lower and the pyramid widens downward.
@@ -124,8 +175,8 @@ export function layoutPyramid(graph: GraphLike): PyramidLayout {
 	const gap = ordered.slice(1).map(() => BASE_GAP);
 	for (const [rootId, depth] of treeDepth) {
 		const root = byId.get(rootId);
-		const i = root ? baseIndex.get(root.leftArtifactId) : undefined;
-		const j = root ? baseIndex.get(root.rightArtifactId) : undefined;
+		const i = root ? indexOf(root.leftArtifactId, 'left') : undefined;
+		const j = root ? indexOf(root.rightArtifactId, 'right') : undefined;
 		if (i === undefined || j === undefined || i === j) continue;
 		const [lo, hi] = i < j ? [i, j] : [j, i];
 		const share = 2 ** Math.min(depth, 12) / (hi - lo);
@@ -150,13 +201,25 @@ export function layoutPyramid(graph: GraphLike): PyramidLayout {
 		return px;
 	};
 
+	const anchorAt = (id: string, side: 'left' | 'right') => {
+		const found = endpoints(id, side === 'left' ? 'from' : 'to')
+			.map((m) => position.get(m))
+			.filter((p): p is { x: number; y: number } => p !== undefined);
+		if (found.length === 0) return undefined;
+		const xs = found.map((p) => p.x);
+		return {
+			x: side === 'left' ? Math.max(...xs) : Math.min(...xs),
+			y: Math.max(...found.map((p) => p.y))
+		};
+	};
+
 	const triangles: PyramidTriangle[] = [];
 	for (const e of accepted.toSorted(
 		(a, b) => a.depth - b.depth || a.createdAt.localeCompare(b.createdAt)
 	)) {
 		const bridge = e.selectedBridgeArtifactId as string;
-		const left = position.get(e.leftArtifactId);
-		const right = position.get(e.rightArtifactId);
+		const left = anchorAt(e.leftArtifactId, 'left');
+		const right = anchorAt(e.rightArtifactId, 'right');
 		if (!left || !right || !artifactsById.has(bridge)) continue;
 		const y = (treeDepth.get(rootOf(e).id) ?? e.depth) - e.depth + 1;
 		const x = place(bridge, (left.x + right.x) / 2, y);
@@ -170,8 +233,8 @@ export function layoutPyramid(graph: GraphLike): PyramidLayout {
 		});
 	}
 	for (const e of open) {
-		const left = position.get(e.leftArtifactId);
-		const right = position.get(e.rightArtifactId);
+		const left = anchorAt(e.leftArtifactId, 'left');
+		const right = anchorAt(e.rightArtifactId, 'right');
 		if (!left || !right) continue;
 		e.bridgeArtifactIds
 			.filter((id) => artifactsById.has(id) && !position.has(id))
@@ -194,9 +257,32 @@ export function layoutPyramid(graph: GraphLike): PyramidLayout {
 			});
 	}
 
+	const frames = [...openComposites.values()].flatMap((c) => {
+		const inside = new Set<string>();
+		const stack = [...c.memberArtifactIds];
+		while (stack.length > 0) {
+			const id = stack.pop() as string;
+			if (inside.has(id)) continue;
+			inside.add(id);
+			stack.push(...(openComposites.get(id)?.memberArtifactIds ?? []));
+		}
+		const pts = nodes.filter((n) => inside.has(n.artifactId));
+		if (pts.length === 0) return [];
+		return [
+			{
+				compositeId: c.artifactId,
+				minX: Math.min(...pts.map((p) => p.x)),
+				maxX: Math.max(...pts.map((p) => p.x)),
+				minY: Math.min(...pts.map((p) => p.y)),
+				maxY: Math.max(...pts.map((p) => p.y))
+			}
+		];
+	});
+
 	return {
 		nodes,
 		triangles,
+		frames,
 		width: Math.max(0, ...nodes.map((n) => n.x)),
 		height: Math.max(0, ...nodes.map((n) => n.y))
 	};

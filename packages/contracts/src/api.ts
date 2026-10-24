@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { CompositeDefinitionRecord, CompositeSummary } from './composites.ts';
 import {
 	ArtifactKind,
 	ArtifactStatus,
@@ -198,7 +199,9 @@ export const ProjectGraph = z.object({
 	artifacts: z.array(Artifact),
 	relations: z.array(Relation),
 	expansions: z.array(Expansion),
-	candidates: z.array(ExpansionCandidate)
+	candidates: z.array(ExpansionCandidate),
+	/** Head definitions of visible composites, filtered per member ACL. */
+	composites: z.array(CompositeSummary).default([])
 });
 export type ProjectGraph = z.infer<typeof ProjectGraph>;
 
@@ -219,7 +222,9 @@ export const ExportBundle = z.object({
 	revisions: z.array(ArtifactRevision),
 	relations: z.array(Relation),
 	expansions: z.array(Expansion),
-	candidates: z.array(ExpansionCandidate)
+	candidates: z.array(ExpansionCandidate),
+	/** Every composite definition revision (additive in v1; absent in older bundles). */
+	compositeDefinitions: z.array(CompositeDefinitionRecord).default([])
 });
 export type ExportBundle = z.infer<typeof ExportBundle>;
 

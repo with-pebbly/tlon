@@ -144,6 +144,59 @@ export function findBundleIntegrityIssues(bundle: ExportBundle): BundleIssue[] {
 			});
 		}
 	}
+
+	const definitionIds = new Set<string>();
+	for (const d of bundle.compositeDefinitions) {
+		if (definitionIds.has(d.id)) dup('compositeDefinitions', d.id);
+		definitionIds.add(d.id);
+		const at = `compositeDefinitions.${d.id}`;
+		if (!artifactIds.has(d.compositeArtifactId)) {
+			issues.push({
+				path: `${at}.compositeArtifactId`,
+				message: 'unknown artifact',
+				ref: d.compositeArtifactId
+			});
+		}
+		if (revisionById.get(d.artifactRevisionId) !== d.compositeArtifactId) {
+			issues.push({
+				path: `${at}.artifactRevisionId`,
+				message: 'revision mismatch',
+				ref: d.artifactRevisionId
+			});
+		}
+		const memberIds = new Set(d.members.map((m) => m.artifactId));
+		for (const m of d.members) {
+			if (revisionById.get(m.pinnedRevisionId) !== m.artifactId) {
+				issues.push({
+					path: `${at}.members`,
+					message: 'pinned member revision mismatch',
+					ref: m.pinnedRevisionId
+				});
+			}
+		}
+		for (const r of d.memberRelationIds) {
+			if (!relationIds.has(r))
+				issues.push({ path: `${at}.memberRelationIds`, message: 'unknown relation', ref: r });
+		}
+		for (const ref of [...d.boundary.entries, ...d.boundary.exits]) {
+			if (!memberIds.has(ref))
+				issues.push({ path: `${at}.boundary`, message: 'boundary is not a member', ref });
+		}
+		for (const claim of [
+			...d.contract.entryConditions,
+			...d.contract.exitConditions,
+			...d.contract.invariants,
+			...d.contract.keyClaims
+		]) {
+			if (revisionById.get(claim.sourceRevisionId) !== claim.sourceArtifactId) {
+				issues.push({
+					path: `${at}.contract`,
+					message: 'claim source revision mismatch',
+					ref: claim.sourceRevisionId
+				});
+			}
+		}
+	}
 	return issues;
 }
 
@@ -206,6 +259,33 @@ export function remapBundleIds(
 			id: id(c.id),
 			expansionId: id(c.expansionId),
 			artifactId: id(c.artifactId)
-		}))
+		})),
+		compositeDefinitions: bundle.compositeDefinitions.map((d) => {
+			const claim = (c: (typeof d.contract.keyClaims)[number]) => ({
+				...c,
+				sourceArtifactId: id(c.sourceArtifactId),
+				sourceRevisionId: id(c.sourceRevisionId)
+			});
+			return {
+				...d,
+				id: id(d.id),
+				compositeArtifactId: id(d.compositeArtifactId),
+				artifactRevisionId: id(d.artifactRevisionId),
+				members: d.members.map((m) => ({
+					...m,
+					artifactId: id(m.artifactId),
+					pinnedRevisionId: id(m.pinnedRevisionId)
+				})),
+				memberRelationIds: d.memberRelationIds.map(id),
+				boundary: { entries: d.boundary.entries.map(id), exits: d.boundary.exits.map(id) },
+				contract: {
+					...d.contract,
+					entryConditions: d.contract.entryConditions.map(claim),
+					exitConditions: d.contract.exitConditions.map(claim),
+					invariants: d.contract.invariants.map(claim),
+					keyClaims: d.contract.keyClaims.map(claim)
+				}
+			};
+		})
 	};
 }
