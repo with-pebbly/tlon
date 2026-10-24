@@ -2,6 +2,7 @@ import { goto } from '$app/navigation';
 import { resolve } from '$app/paths';
 import { page } from '$app/state';
 import { api, ApiError, isApiError } from '$lib/api';
+import { loadLayoutChoice, saveLayoutChoice, type GraphLayout } from '$lib/graph/positions';
 import {
 	LOCAL_HUMAN,
 	OPEN_EXPANSION_STATUSES,
@@ -99,6 +100,8 @@ export class Workspace {
 	/** Bumped to ask the graph canvas to center an artifact. */
 	focusRequest = $state.raw<{ artifactId: string; at: number } | null>(null);
 	newArtifactOpen = $state(false);
+	/** Graph view layout, remembered per project in localStorage. */
+	graphLayout: GraphLayout;
 
 	/** Artifact Gateway admin data (HUMAN only); loaded separately from the graph. */
 	agents = $state.raw<AgentPrincipal[]>([]);
@@ -114,6 +117,7 @@ export class Workspace {
 
 	constructor(projectId: string) {
 		this.projectId = projectId;
+		this.graphLayout = $state(loadLayoutChoice(projectId));
 	}
 
 	// ── URL-backed view and selection ──────────────────────────────────────────
@@ -150,6 +154,11 @@ export class Workspace {
 	focusArtifact(artifactId: string) {
 		this.focusRequest = { artifactId, at: Date.now() };
 		return this.select({ type: 'artifact', id: artifactId });
+	}
+
+	setGraphLayout(layout: GraphLayout) {
+		this.graphLayout = layout;
+		saveLayoutChoice(this.projectId, layout);
 	}
 
 	// ── Derived indexes ─────────────────────────────────────────────────────────

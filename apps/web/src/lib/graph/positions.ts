@@ -32,3 +32,25 @@ export function savePositions(projectId: string, view: string, positions: Record
 		// Storage full or disabled: layout simply falls back to automatic positions.
 	}
 }
+
+/** Graph view layout: fractal pyramid (default) or ELK left→right flow. */
+export type GraphLayout = 'pyramid' | 'flow';
+
+const layoutKey = (projectId: string) => `tlon:layout:${projectId}`;
+
+export function loadLayoutChoice(projectId: string): GraphLayout {
+	try {
+		return localStorage.getItem(layoutKey(projectId)) === 'flow' ? 'flow' : 'pyramid';
+	} catch {
+		return 'pyramid';
+	}
+}
+
+export function saveLayoutChoice(projectId: string, layout: GraphLayout) {
+	try {
+		if (layout === 'pyramid') localStorage.removeItem(layoutKey(projectId));
+		else localStorage.setItem(layoutKey(projectId), layout);
+	} catch {
+		// Storage disabled: the choice lasts for this page only.
+	}
+}

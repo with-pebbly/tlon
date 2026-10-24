@@ -91,7 +91,11 @@ const RelationParams = z.object({
 	toId: z.string(),
 	type: z.enum(['precedes', 'causes', 'enables', 'contradicts', 'explains', 'references'])
 });
-const ExpansionParams = z.object({ leftArtifactId: z.string(), rightArtifactId: z.string() });
+const ExpansionParams = z.object({
+	relationId: z.string().optional().describe('Relation (interval) to subdivide — preferred'),
+	leftArtifactId: z.string().optional(),
+	rightArtifactId: z.string().optional()
+});
 const CandidateParams = z.object({
 	expansionId: z.string(),
 	title: z.string().min(1).max(300),
@@ -130,7 +134,10 @@ function commonTools(gw: GatewayClient): CustomTool[] {
 						from: r.fromId,
 						to: r.toId,
 						type: r.type,
-						status: r.status
+						status: r.status,
+						// Present only for roles allowed to see expansions (C/VALIDATOR).
+						producedByExpansion: r.expansionId,
+						alreadyBridgedBy: r.expandedByExpansionId
 					}))
 				});
 			}
@@ -181,16 +188,41 @@ function bridgeTools(gw: GatewayClient): CustomTool[] {
 			loadMode: 'essential',
 			approval: 'write',
 			description:
-				'Open a bridge expansion on an ordered artifact pair (left then right). Returns the expansion id.',
+				'Open a bridge expansion on an interval. Pass relationId of an unbridged relation (preferred), or an ordered artifact pair — a `precedes` relation is created for the pair first so the bridge joins the fractal. Returns the expansion id and depth.',
 			parameters: ExpansionParams,
 			async execute(_id, params) {
-				const detail = await gw.call(
-					'POST',
-					'/expansions',
-					ExpansionDetail,
-					ExpansionParams.parse(params)
-				);
-				return text({ expansionId: detail.expansion.id, depth: detail.expansion.depth });
+				const p = ExpansionParams.parse(params);
+				let relationId = p.relationId;
+				if (!relationId) {
+					if (!p.leftArtifactId || !p.rightArtifactId) {
+						throw new Error('pass relationId or both leftArtifactId and rightArtifactId');
+					}
+					const graph = await gw.call('GET', '/graph', ProjectGraph);
+					const existing = graph.relations.find(
+						(r) =>
+							r.fromId === p.leftArtifactId &&
+							r.toId === p.rightArtifactId &&
+							r.status !== 'REJECTED' &&
+							r.expandedByExpansionId === null
+					);
+					relationId =
+						existing?.id ??
+						(
+							await gw.call('POST', '/relations', Relation, {
+								fromId: p.leftArtifactId,
+								toId: p.rightArtifactId,
+								type: 'precedes'
+							})
+						).id;
+				}
+				const detail = await gw.call('POST', '/expansions', ExpansionDetail, {
+					targetRelationId: relationId
+				});
+				return text({
+					expansionId: detail.expansion.id,
+					relationId,
+					depth: detail.expansion.depth
+				});
 			}
 		},
 		{

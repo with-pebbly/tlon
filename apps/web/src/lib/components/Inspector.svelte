@@ -85,7 +85,13 @@
 				<TensionsPanel />
 				<section>
 					<h3 class="section-title mb-2">Legend</h3>
-					<Legend />
+					<Legend
+						layout={ws.view === 'graph'
+							? ws.graphLayout
+							: ws.view === 'fractal'
+								? 'pyramid'
+								: 'flow'}
+					/>
 				</section>
 			</div>
 		{/if}

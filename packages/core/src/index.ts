@@ -5,3 +5,4 @@ export * from './suggest.ts';
 export * from './tensions.ts';
 export * from './views.ts';
 export * from './visibility.ts';
+export * from './pyramid.ts';

@@ -18,10 +18,20 @@
 - Tool surface follows §7.4: `artifact_list_visible`, `artifact_create`,
   `relation_propose` for A/B; C additionally gets `expansion_propose`,
   `expansion_submit_candidate`, `disclosure_publish`.
-- The orchestrator provisions principals/tokens as the operator, runs A and B in
-  parallel, then C, and finally checks isolation through the gateway with the agents'
-  own tokens (exit code 1 on any leak). The human reviews bridges and disclosures in
-  the web UI.
+- **Run policy: one recursive tree.** A writes the opening, B the ending (in parallel,
+  isolated). C then bridges the A→B seam and, round after round, every open child
+  interval level by level up to `--max-depth` (default 5, ≤ 31 bridges), until the
+  scenario reaches `--target` blocks (default 30). Intervals inside an author's own
+  chain are not bridged, so the result is one fractal rather than a line of small
+  triangles. Finally C briefs A and B through disclosures.
+- **Approval.** By default the orchestrator accepts each bridge and publishes each
+  disclosure as the operator, with an explicit `reason` recorded in the revision and
+  audit trail; `--review` stops after C's first proposals for human review instead.
+- The orchestrator provisions principals/tokens as the operator and finally checks
+  isolation with the agents' own tokens: both authors must have produced artifacts,
+  and every hidden artifact must be absent from the other author's graph and search and
+  return 404 on direct and revision reads (exit code 1 otherwise). Tool errors are
+  logged per agent.
 
 ## Not yet (rest of M4)
 

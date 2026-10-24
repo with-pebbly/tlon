@@ -12,6 +12,7 @@ import {
 	detectTensions,
 	expansionLineage,
 	findBundleIntegrityIssues,
+	layoutPyramid,
 	planChildRelations,
 	remapBundleIds,
 	resolveExpansionParent,
@@ -357,5 +358,38 @@ describe('export bundles', () => {
 		const [before] = buildFractalTree(bundle);
 		const [after] = buildFractalTree(remapped);
 		expect(countAcceptedBridges(after!)).toBe(countAcceptedBridges(before!));
+	});
+});
+
+describe('pyramid layout', () => {
+	it('places every bridge above the midpoint of its anchors and stacks finer bridges lower', () => {
+		const { graph } = expandFully(3);
+		const layout = layoutPyramid(graph);
+		const at = new Map(layout.nodes.map((n) => [n.artifactId, n]));
+		expect(layout.nodes.filter((n) => n.role === 'base')).toHaveLength(2);
+		expect(layout.triangles).toHaveLength(7);
+		for (const t of layout.triangles) {
+			const apex = at.get(t.apexId)!;
+			const l = at.get(t.leftId)!;
+			const r = at.get(t.rightId)!;
+			expect(apex.x).toBe((l.x + r.x) / 2);
+		}
+		const rows = [1, 2, 3].map((y) => layout.nodes.filter((n) => n.y === y).length);
+		expect(rows).toEqual([4, 2, 1]);
+		expect(new Set(layout.nodes.map((n) => `${n.x}:${n.y}`)).size).toBe(layout.nodes.length);
+	});
+
+	it('orders base artifacts along precedes chains, independent of creation order', () => {
+		const late = artifact('late');
+		const early = artifact('early');
+		const graph: MiniGraph = {
+			artifacts: [late, early],
+			relations: [relation(early.id, late.id, { type: 'precedes' })],
+			expansions: []
+		};
+		const xs = layoutPyramid(graph)
+			.nodes.toSorted((a, b) => a.x - b.x)
+			.map((n) => n.artifactId);
+		expect(xs).toEqual([early.id, late.id]);
 	});
 });

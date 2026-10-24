@@ -86,6 +86,14 @@ export const SCOPE_BADGE: Record<OwnerScope, string> = {
 	PROJECT_PUBLIC: 'border-zinc-300 bg-white text-zinc-600'
 };
 
+/** Pyramid cell corner mark per owner scope; public cells carry no mark. */
+export const SCOPE_CORNER: Record<OwnerScope, string | null> = {
+	A_PRIVATE: 'bg-sky-500',
+	B_PRIVATE: 'bg-fuchsia-500',
+	C_SHARED: 'bg-amber-500',
+	PROJECT_PUBLIC: null
+};
+
 export const AGENT_ROLE_LABEL: Record<AgentRole, string> = {
 	A: 'A — private reasoner',
 	B: 'B — private reasoner',
