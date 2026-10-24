@@ -16,8 +16,15 @@ M0–M2 resolved every request to `LOCAL_HUMAN`.
   role always comes from the principal record; role/principal fields in requests are
   ignored.
 - **Human access.** A request without a token is the local operator only when the TCP
-  peer is loopback (proxy headers are ignored). Real human authentication is out of
-  scope until multi-user (§10 non-goal).
+  peer is loopback (proxy headers are ignored). An `Authorization` header that is
+  present but invalid is always 401 — it never falls back to the operator. Tlön is a
+  local, single-operator tool, so there is deliberately no login (owner decision,
+  2026-10-24; a login/session variant was built and reverted).
+- **Consequence for agents.** Any co-located process that can make raw HTTP requests
+  can omit the header and act as the operator. Agent isolation therefore also depends
+  on the runner: agent sessions (M4) get only gateway tools bound to their own token —
+  no shell, filesystem, fetch or browser tools. Exposing the API beyond localhost or
+  giving agents raw network access requires real human authentication first.
 - **Policy in one place.** `@tlon/core/visibility.ts` defines visible scopes,
   creation/write scopes and the role → action matrix. The store applies one SQL
   visibility predicate (scope ∈ visible scopes ∨ active READ grant) to every artifact,
