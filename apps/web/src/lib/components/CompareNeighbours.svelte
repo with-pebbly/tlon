@@ -5,6 +5,7 @@
 
 <script lang="ts">
 	import {
+		eventOfStateKey,
 		PROVENANCE_CHIP,
 		PROVENANCE_LABEL,
 		provenanceOf,
@@ -16,6 +17,7 @@
 
 	import AssertionList from './AssertionList.svelte';
 	import Modal from './Modal.svelte';
+	import TimeAndEvents from './TimeAndEvents.svelte';
 
 	let {
 		artifactId,
@@ -56,13 +58,19 @@
 				columns.flatMap(({ id }) => {
 					const t = transitionOf(id);
 					return t
-						? [...t.preconditions, ...t.effects, ...t.assumptions].map((a) => stateKeyOf(a))
+						? [
+								...[...t.preconditions, ...t.effects, ...t.assumptions].map((a) => stateKeyOf(a)),
+								...[...t.events, ...t.repeatableEvents].map((e) => `event:${e}`)
+							]
 						: [];
 				})
 			)
 		].toSorted()
 	);
 	const focusKeys = $derived(focusKey ? new Set([focusKey]) : NONE);
+	/** An `event:<id>` focus names a story event, not a state key. */
+	const focusEvent = $derived(eventOfStateKey(focusKey));
+	const focusEvents = $derived(focusEvent ? new Set([focusEvent]) : NONE);
 
 	function view(id: string) {
 		const path = through?.path ?? [];
@@ -146,7 +154,7 @@
 							}}>{v.artifact?.title ?? column.id}</button
 						>
 						<p class="text-xs whitespace-pre-line text-zinc-700">{v.excerpt || '(no text)'}</p>
-						{#if focusKey}
+						{#if focusKey && !focusEvent}
 							<div
 								class="flex flex-wrap items-baseline gap-x-1.5 rounded-md border border-rose-200 bg-rose-50/60 px-2 py-1 text-xs"
 							>
@@ -162,6 +170,7 @@
 							</div>
 						{/if}
 						{#if v.transition}
+							<TimeAndEvents transition={v.transition} highlightEvents={focusEvents} />
 							{#each [['Preconditions', v.transition.preconditions], ['Effects', v.transition.effects], ['Assumptions', v.transition.assumptions]] as const as [label, items] (label)}
 								<div class="flex flex-col gap-1">
 									<div class="section-title">{label}</div>

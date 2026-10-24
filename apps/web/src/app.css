@@ -111,7 +111,8 @@
 	stroke: var(--color-amber-500);
 }
 /* Continuity overlay: blockers red, warnings amber, tensions keep the creative amber
-   (dashed) — never red. Highlight and selection rules below still win. */
+   (dashed) — never red; a probable missing transition is a dotted sky "gap". Highlight
+   and selection rules below still win. */
 .svelte-flow .svelte-flow__edge.tlon-issue-blocker path.svelte-flow__edge-path {
 	stroke: var(--color-rose-500);
 	stroke-width: 2;
@@ -126,6 +127,11 @@
 	stroke: var(--color-amber-500);
 	stroke-width: 1.5;
 	stroke-dasharray: 4 3;
+}
+.svelte-flow .svelte-flow__edge.tlon-issue-gap path.svelte-flow__edge-path {
+	stroke: var(--color-sky-500);
+	stroke-width: 2;
+	stroke-dasharray: 2 3;
 }
 /* Edge labels are portaled out of the edge group; they select their edge on click. */
 .svelte-flow .tlon-edge-label {
@@ -264,6 +270,9 @@
 	.svelte-flow__edge.tlon-edge-aggregated:is(.tlon-issue-warning, .tlon-issue-creative)
 	path.svelte-flow__edge-path {
 	stroke: var(--color-amber-500);
+}
+.svelte-flow .svelte-flow__edge.tlon-edge-aggregated.tlon-issue-gap path.svelte-flow__edge-path {
+	stroke: var(--color-sky-500);
 }
 .svelte-flow .svelte-flow__edge.tlon-edge-aggregated.selected path.svelte-flow__edge-path {
 	stroke: var(--color-accent-600);

@@ -4,6 +4,7 @@
 
 <script lang="ts">
 	import {
+		MONOTONIC_BADGE,
 		PROVENANCE_CHIP,
 		PROVENANCE_LABEL,
 		provenanceOf,
@@ -54,8 +55,17 @@
 				<span class="font-mono break-all text-zinc-700">{key}</span>
 				<span class="text-zinc-400">=</span>
 				<span class="font-mono font-semibold break-all text-zinc-900"
-					>{String(assertion.value)}</span
+					>{String(assertion.value)}{#if assertion.unit}<span
+							class="ml-0.5 font-normal text-zinc-500">{assertion.unit}</span
+						>{/if}</span
 				>
+				{#if assertion.monotonic}
+					{@const badge = MONOTONIC_BADGE[assertion.monotonic]}
+					<span
+						class="chip border-indigo-200 bg-indigo-50 font-mono text-indigo-700"
+						title="One-way quantity: {badge.title}">{badge.glyph}</span
+					>
+				{/if}
 				{#if !world}
 					<span class="chip border-violet-200 bg-violet-50 text-violet-700"
 						>{assertion.epistemic}{assertion.holder ? ` · ${assertion.holder}` : ''}</span

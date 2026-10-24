@@ -14,13 +14,21 @@
 			tone: 'blocker',
 			stroke: 'var(--color-rose-500)',
 			dash: '',
-			detail: 'continuity or anchor violation on the story path'
+			detail:
+				'continuity or anchor violation; out-of-time-order beat, duplicate event or reversed one-way quantity when severe'
 		},
 		{
 			tone: 'warning',
 			stroke: 'var(--color-amber-500)',
 			dash: '',
-			detail: 'abandoned preparation or stale annotation'
+			detail:
+				'abandoned preparation, stale annotation, or an uncertain time-order / event / one-way quantity clash'
+		},
+		{
+			tone: 'gap',
+			stroke: 'var(--color-sky-500)',
+			dash: '2 3',
+			detail: 'state differs across unnarrated beats — a prompt for a bridge, not a contradiction'
 		},
 		{
 			tone: 'creative',

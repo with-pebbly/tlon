@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { clockOf, formatBeatTime } from '$lib/continuity';
 	import { worldTimeRange } from '$lib/graph/composites';
 	import { getWorkspace } from '$lib/state/context';
 	import { artifactCategory, CATEGORY_CARD, STATUS_TEXT } from '$lib/ui';
@@ -41,6 +42,8 @@
 
 {#snippet card(artifactId: string)}
 	{@const artifact = ws.artifactsById.get(artifactId)}
+	{@const time = ws.transitionsByArtifact.get(artifactId)?.transition.time}
+	{@const timeLabel = formatBeatTime(time)}
 	{#if artifact}
 		<button
 			class={[
@@ -60,6 +63,33 @@
 			<span class="line-clamp-3 font-medium text-zinc-900">{artifact.title}</span>
 			{#if typeof artifact.structured.worldTime === 'string'}
 				<span class="text-[11px] text-zinc-500">world time: {artifact.structured.worldTime}</span>
+			{/if}
+			{#if time && timeLabel}
+				<span
+					class={['font-mono text-[11px]', time.outOfOrder ? 'text-violet-700' : 'text-zinc-700']}
+					title={time.outOfOrder ? 'Flashback — excluded from chronology checks' : 'Story time'}
+					>{timeLabel}</span
+				>
+				{#if time.approx && time.minute !== undefined && time.toleranceMinutes > 0}
+					{@const from = Math.max(0, time.minute - time.toleranceMinutes)}
+					{@const to = Math.min(24 * 60 - 1, time.minute + time.toleranceMinutes)}
+					<span
+						class="relative block h-1.5 w-full rounded-full bg-zinc-100"
+						title="Approximate: {clockOf(from)}–{clockOf(to)} within the day"
+						aria-label="Time range {clockOf(from)} to {clockOf(to)}"
+						role="img"
+					>
+						<span
+							class="absolute inset-y-0 min-w-1 rounded-full bg-sky-300"
+							style:left="{(from / (24 * 60)) * 100}%"
+							style:width="{((to - from) / (24 * 60)) * 100}%"
+						></span>
+						<span
+							class="absolute inset-y-[-2px] w-px bg-sky-700"
+							style:left="{(time.minute / (24 * 60)) * 100}%"
+						></span>
+					</span>
+				{/if}
 			{/if}
 		</button>
 	{:else}

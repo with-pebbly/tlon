@@ -6,6 +6,7 @@
 <script lang="ts">
 	import { isApiError } from '$lib/api';
 	import {
+		eventOfStateKey,
 		PROVENANCE_CHIP,
 		PROVENANCE_LABEL,
 		provenanceOf,
@@ -19,6 +20,7 @@
 
 	import AssertionList from './AssertionList.svelte';
 	import IssueRow from './IssueRow.svelte';
+	import TimeAndEvents from './TimeAndEvents.svelte';
 	import TransitionEditor from './TransitionEditor.svelte';
 
 	let { artifact }: { artifact: Artifact } = $props();
@@ -58,6 +60,9 @@
 		)
 	);
 	const issueKeys = $derived(new Set(issues.flatMap((i) => (i.stateKey ? [i.stateKey] : []))));
+	const issueEvents = $derived(
+		new Set(issues.map((i) => eventOfStateKey(i.stateKey)).filter((e) => e !== null))
+	);
 	const incoming = $derived(
 		replay ? [...replay.world].toSorted(([a], [b]) => a.localeCompare(b)) : []
 	);
@@ -187,6 +192,10 @@
 			oncancel={() => (editing = false)}
 		/>
 	{:else if through && transition}
+		<section class="flex flex-col gap-1.5" aria-label="Time and events">
+			<h3 class="section-title">Time and events</h3>
+			<TimeAndEvents {transition} highlightEvents={issueEvents} />
+		</section>
 		<section class="flex flex-col gap-1.5" aria-label="Preconditions">
 			<h3 class="section-title">Preconditions</h3>
 			<AssertionList
@@ -217,6 +226,7 @@
 	{:else if transition}
 		<section class="flex flex-col gap-1.5" aria-label="Contract">
 			<h3 class="section-title">Contract</h3>
+			<TimeAndEvents {transition} />
 			{#each [['Preconditions', transition.preconditions], ['Effects', transition.effects], ['Assumptions', transition.assumptions]] as const as [label, items] (label)}
 				<div class="text-[11px] text-zinc-500">{label}</div>
 				<AssertionList {items} path={[]} {provenance} />

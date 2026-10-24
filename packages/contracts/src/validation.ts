@@ -44,17 +44,60 @@ export const Assertion = z.object({
 	/** Effect that can happen only once on a path (a valve drained, a ship wrecked). */
 	irreversible: z.boolean().default(false),
 	/** Effect that sets up an action a later beat is expected to consume (a lever readied). */
-	preparation: z.boolean().default(false)
+	preparation: z.boolean().default(false),
+	/**
+	 * Numeric quantities that may only move one way along story time (a countdown, fuel,
+	 * water level after release). `decreasing` also forbids staying equal while story
+	 * time advances (a countdown cannot freeze unexplained).
+	 */
+	monotonic: z.enum(['decreasing', 'non_increasing', 'increasing', 'non_decreasing']).optional(),
+	/** Unit of a numeric value (`seconds`, `metres`); values with different units never compare. */
+	unit: z.string().trim().max(40).optional()
 });
 export type Assertion = z.infer<typeof Assertion>;
 export type AssertionInput = z.input<typeof Assertion>;
+
+/**
+ * When a beat happens in story time, as far as the text says. `day` is a relative day
+ * index within the story (0 = first day), `minute` minutes after that day's midnight.
+ * Either may be absent; `approx` widens comparisons by `toleranceMinutes`.
+ */
+export const BeatTime = z.object({
+	day: z.int().min(-100_000).max(100_000).optional(),
+	minute: z
+		.int()
+		.min(0)
+		.max(24 * 60 - 1)
+		.optional(),
+	approx: z.boolean().default(false),
+	toleranceMinutes: z
+		.int()
+		.min(0)
+		.max(24 * 60)
+		.default(0),
+	/** Explicit flashback/flash-forward: excluded from chronology checks. */
+	outOfOrder: z.boolean().default(false)
+});
+export type BeatTime = z.infer<typeof BeatTime>;
+
+const EventId = z
+	.string()
+	.trim()
+	.min(1)
+	.max(120)
+	.regex(/^[a-z0-9_.:-]+$/, 'lower_snake event id, e.g. ilse.wakes or call.charter_office.ends');
 
 /** State contract of one beat: what must hold before, what it changes, what it invents. */
 export const Transition = z.object({
 	preconditions: z.array(Assertion).max(40).default([]),
 	effects: z.array(Assertion).max(40).default([]),
 	/** Newly invented facts this beat relies on (become committed only on acceptance). */
-	assumptions: z.array(Assertion).max(40).default([])
+	assumptions: z.array(Assertion).max(40).default([]),
+	time: BeatTime.optional(),
+	/** Unique story events this beat performs (each may happen once on the path unless repeatable). */
+	events: z.array(EventId).max(20).default([]),
+	/** Events this beat performs that may legitimately recur (a second phone call). */
+	repeatableEvents: z.array(EventId).max(20).default([])
 });
 export type Transition = z.infer<typeof Transition>;
 export type TransitionInput = z.input<typeof Transition>;
@@ -108,6 +151,14 @@ export const ISSUE_KINDS = [
 	'abandoned_preparation',
 	/** The annotation describes an older revision than the artifact's head. */
 	'stale_annotation',
+	/** A beat is placed after a beat that happens later in story time. */
+	'temporal_order',
+	/** The same unique event (a call ending, a character waking) happens twice on the path. */
+	'duplicate_event',
+	/** A one-way quantity moves the wrong way or a countdown freezes while time passes. */
+	'monotonic_violation',
+	/** State differs across a gap of unnarrated beats: a transition is probably missing. */
+	'missing_transition',
 	'unknown'
 ] as const;
 export const IssueKind = z.enum(ISSUE_KINDS);

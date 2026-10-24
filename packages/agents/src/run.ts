@@ -47,8 +47,10 @@ import {
 	Project,
 	type ProjectGraph,
 	ProjectGraph as ProjectGraphSchema,
-	type Relation
+	type Relation,
+	TransitionAnnotation
 } from '../../contracts/src/index.ts';
+import { type BeatForExtraction, extractTransitions, vocabularyOf } from './extraction.ts';
 import { GatewayClient, toolsForRole } from './gateway-tools.ts';
 import { ROLE_PROMPTS } from './prompts.ts';
 
@@ -62,6 +64,7 @@ const { values } = parseArgs({
 		'max-depth': { type: 'string', default: '5' },
 		'min-depth': { type: 'string', default: '3' },
 		'chain-min-depth': { type: 'string', default: '2' },
+		'max-repairs': { type: 'string', default: '2' },
 		review: { type: 'boolean', default: false },
 		api: { type: 'string', default: process.env.TLON_API_URL ?? 'http://127.0.0.1:3001' }
 	}
@@ -75,6 +78,7 @@ const bridgesPerRound = Number(values['bridges-per-round']);
 const maxDepth = Number(values['max-depth']);
 const seamMinDepth = Number(values['min-depth']);
 const chainMinDepth = Number(values['chain-min-depth']);
+const maxRepairs = Number(values['max-repairs']);
 
 class OperatorError extends Error {
 	readonly code: string;
@@ -127,6 +131,11 @@ const authStorage = await discoverAuthStorage();
 const modelRegistry = new ModelRegistry(authStorage);
 await modelRegistry.refresh();
 const toolErrors: string[] = [];
+/** Expansions whose candidates kept failing the gate after all repair attempts. */
+const unresolved = new Map<string, Rejection>();
+/** Candidates the verifier could not annotate (accepted on C's own contract only). */
+const unverified = new Set<string>();
+let gateRejections = 0;
 
 const stopped = new Map<string, string>();
 
@@ -259,16 +268,99 @@ function chainEnds(g: ProjectGraph, scope: 'A_PRIVATE' | 'B_PRIVATE') {
 	};
 }
 
-type Rejection = { expansionId: string; title: string; explanation: string };
+type Rejection = {
+	expansionId: string;
+	relationId: string | null;
+	title: string;
+	explanation: string;
+};
+
+/**
+ * Independent verification of every pending candidate (LIGHTHOUSE_V2_REVIEW §1/§3):
+ * a read-only VALIDATOR session re-extracts the candidate's contract from its text,
+ * with its two neighbours' contracts as context and the project vocabulary. The
+ * operator stores it as the candidate's latest (`extracted`) annotation, so the accept
+ * gate judges what the bridge narrates, not what C claimed about it.
+ */
+async function verifyCandidates(projectId: string): Promise<void> {
+	const g = await graphOf(projectId);
+	const contracts = new Map(g.transitions.map((t) => [t.artifactId, t.transition]));
+	const beats: BeatForExtraction[] = [];
+	const pending: Array<{ artifactId: string; revisionId: string }> = [];
+	for (const e of g.expansions.filter((x) => x.status === 'REVIEW')) {
+		const detail = await operator(
+			'GET',
+			`/projects/${projectId}/expansions/${e.id}`,
+			ExpansionDetail
+		);
+		const candidate = detail.candidates.find((c) => c.reviewStatus === 'PENDING');
+		if (!candidate) continue;
+		const mechanism = candidate.artifact.structured.mechanism;
+		const context = (a: typeof detail.left) => ({
+			id: a.id,
+			order: 0,
+			title: a.title,
+			body: a.body,
+			contextOnly: true,
+			...(contracts.get(a.id) ? { knownContract: contracts.get(a.id) } : {})
+		});
+		beats.push(
+			context(detail.left),
+			{
+				id: candidate.artifact.id,
+				order: 0,
+				title: candidate.artifact.title,
+				body: candidate.artifact.body,
+				...(typeof mechanism === 'string' ? { mechanism } : {})
+			},
+			context(detail.right)
+		);
+		pending.push({
+			artifactId: candidate.artifact.id,
+			revisionId: candidate.artifact.headRevisionId
+		});
+	}
+	if (pending.length === 0) return;
+	const proposals = await extractTransitions({
+		beats,
+		vocabulary: vocabularyOf(g),
+		authStorage,
+		modelRegistry,
+		chunk: 3
+	});
+	for (const p of pending) {
+		const t = proposals.get(p.artifactId);
+		if (!t) {
+			unverified.add(p.artifactId);
+			continue;
+		}
+		await operator(
+			'PUT',
+			`/projects/${projectId}/artifacts/${p.artifactId}/transition`,
+			TransitionAnnotation,
+			{
+				artifactRevisionId: p.revisionId,
+				transition: t,
+				source: 'extracted',
+				reviewed: false
+			}
+		);
+	}
+	console.log(
+		`verified ${pending.length - [...unverified].filter((id) => pending.some((p) => p.artifactId === id)).length}/${pending.length} candidates independently`
+	);
+}
 
 /**
  * Accepts each reviewed bridge as the operator. The gateway refuses candidates that
- * add blocker continuity issues (CONTINUITY_VIOLATION); those are rejected — never
- * force-accepted — and returned so C can submit a corrected candidate.
+ * add blocker continuity issues (CONTINUITY_VIOLATION); then EVERY pending candidate of
+ * that expansion is rejected (so the candidate limit never blocks a repair) and the
+ * findings are returned for C. Nothing is ever force-accepted.
  */
 async function acceptReviewedBridges(
 	projectId: string
 ): Promise<{ accepted: number; rejected: Rejection[] }> {
+	await verifyCandidates(projectId);
 	const g = await graphOf(projectId);
 	let accepted = 0;
 	const rejected: Rejection[] = [];
@@ -278,14 +370,18 @@ async function acceptReviewedBridges(
 			`/projects/${projectId}/expansions/${e.id}`,
 			ExpansionDetail
 		);
-		const candidate = detail.candidates.find((c) => c.reviewStatus === 'PENDING');
+		const pendingCandidates = detail.candidates.filter((c) => c.reviewStatus === 'PENDING');
+		const candidate = pendingCandidates[0];
 		if (!candidate) continue;
 		try {
 			await operator(
 				'POST',
 				`/projects/${projectId}/expansions/${e.id}/accept`,
 				AcceptExpansionResult,
-				{ candidateId: candidate.id, reason: 'accepted by runner auto-accept policy' },
+				{
+					candidateId: candidate.id,
+					reason: 'accepted by runner auto-accept policy (independently verified)'
+				},
 				{ 'idempotency-key': randomUUID() }
 			);
 			accepted++;
@@ -295,11 +391,24 @@ async function acceptReviewedBridges(
 				.filter((i) => i.severity === 'blocker')
 				.map((i) => i.explanation)
 				.join(' | ');
-			await operator('POST', `/projects/${projectId}/expansions/${e.id}/reject`, ExpansionDetail, {
-				candidateId: candidate.id,
-				reason: 'continuity validation failed'
+			for (const c of pendingCandidates) {
+				await operator(
+					'POST',
+					`/projects/${projectId}/expansions/${e.id}/reject`,
+					ExpansionDetail,
+					{
+						candidateId: c.id,
+						reason: 'continuity validation failed'
+					}
+				);
+			}
+			gateRejections++;
+			rejected.push({
+				expansionId: e.id,
+				relationId: e.targetRelationId,
+				title: candidate.artifact.title,
+				explanation
 			});
-			rejected.push({ expansionId: e.id, title: candidate.artifact.title, explanation });
 			console.log(`  ✗ rejected "${candidate.artifact.title}": ${explanation}`);
 		}
 	}
@@ -376,6 +485,7 @@ for (let round = 1; round <= maxRounds; round++) {
 			`Premise: ${premise}`,
 			`Budget: the scenario has ${blocks(g)} blocks and should reach about ${target}. Intervals marked MUST BRIDGE need a beat (the story is still too coarse there). For the others decide: BRIDGE (one candidate with a full state contract) or STOP with interval_stop when another beat would only restate motions, delay an established outcome or add no new causal information, character choice or reversal. Uneven depth is good pacing.`,
 			'Before bridging, call artifact_list_visible and read the `state` of both ends and of their neighbours: your preconditions must match what the left end leaves, your effects must leave what the right end requires, and you must not perform the right end’s own irreversible event.',
+			`An independent verifier re-reads your prose and checks it against the neighbours: write each beat strictly inside its interval (after everything the left end narrates, before everything the right end narrates; same clock direction), and reuse these state keys, value tokens and event ids where they apply: ${JSON.stringify(vocabularyOf(g))}`,
 			...tasks
 		].join('\n')
 	);
@@ -385,23 +495,25 @@ for (let round = 1; round <= maxRounds; round++) {
 	}
 	let result = await acceptReviewedBridges(projectId);
 	let accepted = result.accepted;
-	if (result.rejected.length > 0) {
+	for (let attempt = 1; attempt <= maxRepairs && result.rejected.length > 0; attempt++) {
 		await runAgent(
 			c,
 			projectId,
 			[
 				`Premise: ${premise}`,
-				'These candidates failed continuity validation and were rejected. For each, submit ONE corrected candidate to the same expansionId (or interval_stop its relation if the interval needs no beat). Fix the state contract, not just the wording:',
+				`Repair attempt ${attempt}/${maxRepairs}. These candidates failed independent continuity validation and were rejected. For each, submit ONE corrected candidate to the same expansionId — rewrite the beat so it happens strictly between its two ends (no event of the right end, nothing that must come before the left end, no reset of state the left end changed) — or interval_stop its relation if the interval needs no beat:`,
 				...result.rejected.map(
-					(r) => `- expansionId=${r.expansionId} "${r.title}": ${r.explanation}`
+					(r) =>
+						`- expansionId=${r.expansionId} relationId=${r.relationId} "${r.title}": ${r.explanation}`
 				)
 			].join('\n')
 		);
 		result = await acceptReviewedBridges(projectId);
 		accepted += result.accepted;
 	}
+	for (const r of result.rejected) unresolved.set(r.expansionId, r);
 	console.log(
-		`accepted ${accepted} bridges, rejected ${result.rejected.length}, stopped ${stopped.size} intervals so far`
+		`accepted ${accepted} bridges, still rejected ${result.rejected.length}, stopped ${stopped.size} intervals so far`
 	);
 }
 
@@ -459,6 +571,13 @@ console.log(
 			max_depth: Math.max(0, ...bridges.map((e) => e.depth)),
 			tool_errors: toolErrors.length,
 			stopped_intervals: stopped.size,
+			gate_rejections: gateRejections,
+			unresolved_intervals: [...unresolved.values()].map((r) => ({
+				expansionId: r.expansionId,
+				title: r.title,
+				why: r.explanation.slice(0, 200)
+			})),
+			unverified_candidates: unverified.size,
 			isolation_failures: failures
 		},
 		null,

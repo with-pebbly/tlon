@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { clockOf, MONOTONIC_BADGE } from '$lib/continuity';
 	import {
 		Transition,
 		type Assertion,
@@ -19,7 +20,10 @@
 		holder: string;
 		irreversible: boolean;
 		preparation: boolean;
+		unit: string;
+		monotonic: Assertion['monotonic'] | '';
 	};
+	type EventList = 'events' | 'repeatableEvents';
 
 	let {
 		initial,
@@ -45,6 +49,18 @@
 		{ key: 'assumptions', label: 'Assumptions', hint: 'new facts the beat invents and relies on' }
 	];
 	const EPISTEMIC: readonly Assertion['epistemic'][] = ['world', 'belief', 'rumor', 'hypothesis'];
+	const MONOTONIC = Object.entries(MONOTONIC_BADGE) as [
+		NonNullable<Assertion['monotonic']>,
+		(typeof MONOTONIC_BADGE)[keyof typeof MONOTONIC_BADGE]
+	][];
+	const EVENT_LISTS: readonly { key: EventList; label: string; hint: string }[] = [
+		{ key: 'events', label: 'Unique events', hint: 'happen once on the path (ilse.wakes)' },
+		{
+			key: 'repeatableEvents',
+			label: 'Repeatable events',
+			hint: 'may legitimately recur (a second phone call)'
+		}
+	];
 
 	let nextUid = 0;
 	const toRow = (a: Assertion | null): Row => ({
@@ -57,7 +73,9 @@
 		epistemic: a?.epistemic ?? 'world',
 		holder: a?.holder ?? '',
 		irreversible: a?.irreversible ?? false,
-		preparation: a?.preparation ?? false
+		preparation: a?.preparation ?? false,
+		unit: a?.unit ?? '',
+		monotonic: a?.monotonic ?? ''
 	});
 
 	// The editor is mounted per edit session: it starts from the annotation as it was.
@@ -70,6 +88,49 @@
 	});
 	// svelte-ignore state_referenced_locally
 	let reviewed = $state(initialReviewed);
+
+	/** Story time as typed: Day N is 1-based in the form, `day` 0-based in the contract. */
+	let time = $state<{
+		day: number | null;
+		clock: string;
+		approx: boolean;
+		tolerance: number | null;
+		outOfOrder: boolean;
+	}>({
+		day: start?.time?.day === undefined ? null : start.time.day + 1,
+		clock: start?.time?.minute === undefined ? '' : clockOf(start.time.minute),
+		approx: start?.time?.approx ?? false,
+		tolerance: start?.time?.toleranceMinutes ?? 0,
+		outOfOrder: start?.time?.outOfOrder ?? false
+	});
+	let events = $state<Record<EventList, string[]>>({
+		events: [...(start?.events ?? [])],
+		repeatableEvents: [...(start?.repeatableEvents ?? [])]
+	});
+	let eventInput = $state<Record<EventList, string>>({ events: '', repeatableEvents: '' });
+
+	function addEvent(list: EventList) {
+		const id = eventInput[list].trim().toLowerCase().replaceAll(/\s+/g, '_');
+		if (id !== '' && !events[list].includes(id)) events[list].push(id);
+		eventInput[list] = '';
+	}
+
+	function toTime(): TransitionInput['time'] {
+		const day = typeof time.day === 'number' ? time.day - 1 : undefined;
+		const [hours, minutes] = time.clock.split(':').map(Number);
+		const minute =
+			time.clock === '' || hours === undefined || minutes === undefined
+				? undefined
+				: hours * 60 + minutes;
+		if (day === undefined && minute === undefined && !time.outOfOrder) return undefined;
+		return {
+			...(day === undefined ? {} : { day }),
+			...(minute === undefined ? {} : { minute }),
+			approx: time.approx,
+			toleranceMinutes: time.approx ? (time.tolerance ?? 0) : 0,
+			outOfOrder: time.outOfOrder
+		};
+	}
 
 	/** Text → value: unchanged text keeps the loaded value; new text infers number/boolean. */
 	function toValue(row: Row): Assertion['value'] {
@@ -89,14 +150,22 @@
 			irreversible: row.irreversible,
 			preparation: row.preparation,
 			...(row.note.trim() ? { note: row.note.trim() } : {}),
-			...(row.holder.trim() ? { holder: row.holder.trim() } : {})
+			...(row.holder.trim() ? { holder: row.holder.trim() } : {}),
+			...(row.unit.trim() ? { unit: row.unit.trim() } : {}),
+			...(row.monotonic ? { monotonic: row.monotonic } : {})
 		};
 	}
 
-	const draft = $derived<TransitionInput>({
-		preconditions: rows.preconditions.map(toAssertion),
-		effects: rows.effects.map(toAssertion),
-		assumptions: rows.assumptions.map(toAssertion)
+	const draft = $derived.by<TransitionInput>(() => {
+		const at = toTime();
+		return {
+			preconditions: rows.preconditions.map(toAssertion),
+			effects: rows.effects.map(toAssertion),
+			assumptions: rows.assumptions.map(toAssertion),
+			...(at ? { time: at } : {}),
+			events: [...events.events],
+			repeatableEvents: [...events.repeatableEvents]
+		};
 	});
 	const checked = $derived(Transition.safeParse(draft));
 	const errors = $derived(
@@ -112,6 +181,93 @@
 </script>
 
 <form class="flex flex-col gap-3" onsubmit={submit} aria-label="Edit state transition">
+	<fieldset class="flex flex-col gap-1.5">
+		<legend class="mb-1 flex w-full items-baseline gap-2">
+			<span class="label mb-0">Story time</span>
+			<span class="text-[11px] text-zinc-400">when the beat happens, as far as the text says</span>
+		</legend>
+		<div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-zinc-600">
+			<label class="flex items-center gap-1"
+				>Day <input
+					type="number"
+					step="1"
+					class="input h-6 w-16 text-xs"
+					placeholder="—"
+					aria-label="Story day (1 = first day)"
+					bind:value={time.day}
+				/></label
+			>
+			<label class="flex items-center gap-1"
+				>at <input
+					type="time"
+					class="input h-6 w-auto py-0 text-xs"
+					aria-label="Clock time"
+					bind:value={time.clock}
+				/></label
+			>
+			<label class="flex items-center gap-1"
+				><input type="checkbox" bind:checked={time.approx} /> approximate</label
+			>
+			{#if time.approx}
+				<label class="flex items-center gap-1"
+					>± <input
+						type="number"
+						min="0"
+						max="1440"
+						step="1"
+						class="input h-6 w-16 text-xs"
+						aria-label="Tolerance in minutes"
+						bind:value={time.tolerance}
+					/> min</label
+				>
+			{/if}
+			<label
+				class="flex items-center gap-1"
+				title="Flashback / flash-forward: excluded from chronology checks"
+				><input type="checkbox" bind:checked={time.outOfOrder} /> flashback</label
+			>
+		</div>
+	</fieldset>
+
+	{#each EVENT_LISTS as list (list.key)}
+		<fieldset class="flex flex-col gap-1.5">
+			<legend class="mb-1 flex w-full items-baseline gap-2">
+				<span class="label mb-0">{list.label}</span>
+				<span class="text-[11px] text-zinc-400">{list.hint}</span>
+			</legend>
+			<div class="flex flex-wrap items-center gap-1">
+				{#each events[list.key] as id, index (id)}
+					<span
+						class={[
+							'chip gap-0.5 font-mono',
+							list.key === 'events'
+								? 'border-zinc-300 bg-zinc-50 text-zinc-800'
+								: 'border-dashed border-zinc-300 bg-white text-zinc-600'
+						]}
+						>{id}<button
+							type="button"
+							class="px-0.5 text-zinc-400 hover:text-zinc-700"
+							aria-label="Remove {list.label.toLowerCase()} {id}"
+							onclick={() => events[list.key].splice(index, 1)}>✕</button
+						></span
+					>
+				{/each}
+				<input
+					class="input h-6 w-44 font-mono text-xs"
+					placeholder="event.id + Enter"
+					aria-label="Add {list.label.toLowerCase()}"
+					bind:value={eventInput[list.key]}
+					onkeydown={(event) => {
+						if (event.key !== 'Enter') return;
+						event.preventDefault();
+						addEvent(list.key);
+					}}
+					onblur={() => addEvent(list.key)}
+				/>
+			</div>
+		</fieldset>
+	{/each}
+
 	{#each SECTIONS as section (section.key)}
 		<fieldset class="flex flex-col gap-1.5">
 			<legend class="mb-1 flex w-full items-baseline gap-2">
@@ -170,6 +326,26 @@
 						<label class="flex items-center gap-1"
 							><input type="checkbox" bind:checked={row.preparation} /> preparation</label
 						>
+						{#if /^-?\d+(\.\d+)?$/.test(row.value.trim()) || row.unit || row.monotonic}
+							<input
+								class="input h-6 w-20 text-xs"
+								placeholder="unit"
+								aria-label="{section.label} {index + 1} unit"
+								bind:value={row.unit}
+							/>
+							<select
+								class="input h-6 w-auto py-0 text-xs"
+								aria-label="{section.label} {index + 1} one-way direction"
+								bind:value={row.monotonic}
+							>
+								<option value="">two-way</option>
+								{#each MONOTONIC as [value, badge] (value)}
+									<option {value} title={badge.title}
+										>{badge.glyph} {value.replace('_', '-')}</option
+									>
+								{/each}
+							</select>
+						{/if}
 					</div>
 					<input
 						class="input h-6 text-xs"

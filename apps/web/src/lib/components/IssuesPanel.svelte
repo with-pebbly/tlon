@@ -4,6 +4,7 @@
 		ISSUE_KIND_ORDER,
 		issueTone,
 		TONE_GLYPH,
+		TONE_RANK,
 		TONE_TEXT
 	} from '$lib/continuity';
 	import { getWorkspace } from '$lib/state/context';
@@ -16,11 +17,18 @@
 	let showDismissed = $state(false);
 	let unannotatedOpen = $state(false);
 
+	/** One group per kind; its heading takes the strongest tone (severity varies per item). */
 	const groups = $derived(
-		ISSUE_KIND_ORDER.map((kind) => ({
-			kind,
-			items: ws.openIssues.filter((i) => i.kind === kind)
-		})).filter((g) => g.items.length > 0)
+		ISSUE_KIND_ORDER.map((kind) => {
+			const items = ws.openIssues.filter((i) => i.kind === kind);
+			const tone = items
+				.map((i) => issueTone(i))
+				.reduce(
+					(a, b) => (TONE_RANK[b] > TONE_RANK[a] ? b : a),
+					issueTone({ kind, severity: 'info' })
+				);
+			return { kind, items, tone };
+		}).filter((g) => g.items.length > 0)
 	);
 	const unannotatedHighlighted = $derived(ws.highlight?.label === UNANNOTATED_LABEL);
 </script>
@@ -91,7 +99,7 @@
 	{/if}
 
 	{#each groups as group (group.kind)}
-		{@const tone = issueTone(group.items[0] ?? { kind: group.kind, severity: 'info' })}
+		{@const tone = group.tone}
 		<details class="group" open={group.kind !== 'redundancy'}>
 			<summary
 				class="flex cursor-pointer list-none items-center gap-1.5 rounded px-1 py-0.5 text-xs hover:bg-zinc-50"
