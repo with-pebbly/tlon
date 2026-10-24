@@ -103,6 +103,29 @@ run, executes every task in an isolated session that sees only its task view, ch
 isolation and writes the story. `--review` stops after C's first candidates so a human
 facilitator chooses. The previous full-scene bridge runner is `pnpm agents:legacy`.
 
+### After a run: joins, completion, isolation (organizer only)
+
+A shared Fact links two Blocks; it is never read as causality. The facilitator's
+**Protocol → Completion** panel (and `tlon completion|audit <projectId>`) shows:
+
+- **Connections**: thematic echo, causal hypothesis, causal canon, open mystery. AI review
+  only proposes; canon and "intentional open mystery" are human approvals. Rejecting a
+  connection removes that interpretation only.
+- **Completion report**: connected Fact pairs, confirmed cross-branch causal paths
+  (`unknown` until a human records one), open questions, chronology conflicts.
+  **Certify** a policy (`exploratory`, `coherent_open_mystery`, `causally_connected`,
+  `resolved`); certification is refused with reasons when the policy isn't met.
+- **Isolation audit**: per task, the IDs it was served (input manifest), plus server-side
+  deny checks of every A/B participant against the other side's Blocks.
+
+`pnpm analyze --project <id> --out story.md` runs the independent extraction (eras,
+entities with stable ids, beat functions) and the AI join review, then writes the reader
+story, `-organizer.md` and `-chronology.md`. `pnpm agents` runs it automatically.
+
+Protected mode: set `TLON_OPERATOR_TOKEN` to disable tokenless operator access. Without
+it a participant on the same machine could open facilitator pages, so isolation between
+humans holds only across machines.
+
 ## Primary flow (legacy bridges)
 
 1. Create a project (Narrative or Generic) or open the seeded _Earth / Mars_ project.
