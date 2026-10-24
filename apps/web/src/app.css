@@ -87,6 +87,11 @@
 	stroke: var(--color-accent-200);
 	stroke-dasharray: 3 3;
 }
+/* Block–Fact gap awaiting C's Fact (amber, like Fact chips). */
+.svelte-flow .svelte-flow__edge.tlon-gap path.svelte-flow__edge-path {
+	stroke: var(--color-amber-500);
+	stroke-dasharray: 5 4;
+}
 .svelte-flow .svelte-flow__edge.tlon-tri-selected path.svelte-flow__edge-path {
 	stroke: var(--color-accent-500);
 	stroke-width: 1.5;

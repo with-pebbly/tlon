@@ -63,6 +63,7 @@ function toAgent(row: AgentPrincipalRow): AgentPrincipal {
 		projectId: row.projectId,
 		role: row.role as AgentPrincipal['role'],
 		name: row.name,
+		executorKind: row.executorKind as AgentPrincipal['executorKind'],
 		createdAt: row.createdAt.toISOString(),
 		disabledAt: row.disabledAt?.toISOString() ?? null
 	};
@@ -113,6 +114,8 @@ async function findAgent(
 	if (!row) throw new TlonError('PRINCIPAL_NOT_FOUND', 'principal not found', { principalId });
 	return row;
 }
+
+export { toAgent };
 
 export function gatewayMethods(ctx: Ctx) {
 	const { db } = ctx;
@@ -222,6 +225,7 @@ export function gatewayMethods(ctx: Ctx) {
 						projectId,
 						role: data.role,
 						name: data.name,
+						executorKind: data.executorKind,
 						createdAt: ctx.now(),
 						disabledAt: null
 					})

@@ -70,7 +70,7 @@
 			const graph = await api.getGraph(ws.projectId);
 			download(
 				`${slug(graph.project.name)}.md`,
-				renderStoryMarkdown(graph, { annotations: true }),
+				renderStoryMarkdown({ ...graph, triangles: ws.triangles }, { annotations: true }),
 				'text/markdown'
 			);
 		} catch (error) {
@@ -203,6 +203,11 @@
 	{#if ws.pending > 0 || ws.loading}
 		<span class="text-xs text-zinc-400">Syncing…</span>
 	{/if}
+	<a
+		class="btn"
+		href={resolve('/projects/[projectId]/protocol', { projectId: ws.projectId })}
+		title="Block–Fact protocol: participants, runs, tasks and triangles">Protocol</a
+	>
 	<button class="btn" onclick={() => (ws.gatewayPanel = 'agents')}>Agents</button>
 	<button
 		class={['btn', ws.pendingDisclosures.length > 0 && 'border-amber-300 text-amber-800']}

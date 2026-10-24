@@ -8,6 +8,8 @@
 	import ExpansionInspector from './ExpansionInspector.svelte';
 	import IssuesPanel from './IssuesPanel.svelte';
 	import Legend from './Legend.svelte';
+	import FactInspector from './protocol/FactInspector.svelte';
+	import TriangleCard from './protocol/TriangleCard.svelte';
 	import RelationInspector from './RelationInspector.svelte';
 	import TensionsPanel from './TensionsPanel.svelte';
 
@@ -22,6 +24,9 @@
 	);
 	const aggregate = $derived(
 		selection?.type === 'aggregate' ? ws.aggregatedById.get(selection.id) : undefined
+	);
+	const triangle = $derived(
+		selection?.type === 'triangle' ? ws.trianglesById.get(selection.id) : undefined
 	);
 	const counts = $derived({
 		artifacts: ws.artifacts.filter((a) => a.status !== 'REJECTED').length,
@@ -58,6 +63,10 @@
 				{#key artifact.id}
 					<CompositeInspector {artifact} />
 				{/key}
+			{:else if artifact && artifact.artifactClass === 'FACT'}
+				{#key `${artifact.id}:${artifact.headRevisionId}`}
+					<FactInspector {artifact} />
+				{/key}
 			{:else if artifact}
 				{#key `${artifact.id}:${artifact.headRevisionId}`}
 					<ArtifactInspector {artifact} />
@@ -86,6 +95,12 @@
 				<ExpansionInspector expansionId={selection.id} />
 			{:else}
 				<p class="text-zinc-500">Expansion not found in this project.</p>
+			{/if}
+		{:else if selection?.type === 'triangle'}
+			{#if triangle}
+				<TriangleCard {triangle} />
+			{:else}
+				<p class="text-zinc-500">Triangle not found in this project.</p>
 			{/if}
 		{:else}
 			<div class="flex flex-col gap-5">

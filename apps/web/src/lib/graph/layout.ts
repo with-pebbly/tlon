@@ -164,8 +164,11 @@ export const PYRAMID_LARGE: PyramidScale = {
 	frame: { pad: 14, tab: 24, minWidth: 280 }
 };
 
-/** 'loose' = visible artifact the pyramid could not place (e.g. its anchors are filtered out). */
-export type PyramidRole = 'base' | 'bridge' | 'candidate' | 'loose';
+/**
+ * 'fact' = accepted Block–Fact apex; 'loose' = visible artifact the pyramid could not
+ * place (e.g. its anchors are filtered out, or a Fact candidate still under review).
+ */
+export type PyramidRole = 'base' | 'bridge' | 'fact' | 'candidate' | 'loose';
 
 export type PyramidPlacement = { position: XY; role: PyramidRole; depth: number };
 

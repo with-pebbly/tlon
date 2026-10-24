@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { clockOf, formatBeatTime } from '$lib/continuity';
 	import { worldTimeRange } from '$lib/graph/composites';
+	import { FACT_KIND_ICON } from '$lib/protocol';
 	import { getWorkspace } from '$lib/state/context';
 	import { artifactCategory, CATEGORY_CARD, STATUS_TEXT } from '$lib/ui';
 	import { transitiveMembers } from '@tlon/core';
@@ -37,6 +38,10 @@
 				memberIds: c.memberArtifactIds.filter((id) => ws.artifactsById.has(id)),
 				span: worldTimeRange(transitiveMembers(c.artifactId, ws.membership), ws.artifactsById)
 			}))
+	);
+	/** Facts are atemporal connectors: listed beside the threads, never placed on them. */
+	const facts = $derived(
+		ws.factArtifacts.filter((a) => a.status !== 'REJECTED' || ws.filters.showRejected)
 	);
 </script>
 
@@ -109,6 +114,41 @@
 	<p class="mb-4 text-xs text-zinc-400">
 		Order follows the expansion intervals; a bridge is not claimed to be a chronological midpoint.
 	</p>
+	{#if facts.length > 0}
+		<aside
+			class="absolute top-4 right-4 z-10 max-h-[60%] w-72 overflow-y-auto rounded-lg border border-amber-300 bg-amber-50/95 p-3 shadow-sm"
+			aria-label="Atemporal facts"
+		>
+			<h3 class="section-title mb-1 text-amber-900">Atemporal facts</h3>
+			<p class="mb-2 text-[11px] text-amber-900/80">
+				Facts connect blocks without a place in time; they are not beats.
+			</p>
+			<ul class="flex flex-col gap-1">
+				{#each facts as fact (fact.id)}
+					<li>
+						<button
+							class={[
+								'flex w-full items-start gap-1.5 rounded px-1.5 py-1 text-left text-[13px] hover:bg-amber-100',
+								fact.status !== 'ACCEPTED' && 'text-zinc-500'
+							]}
+							onclick={() => ws.select({ type: 'artifact', id: fact.id })}
+						>
+							<span aria-hidden="true">{fact.factKind ? FACT_KIND_ICON[fact.factKind] : '◆'}</span>
+							<span class="min-w-0 flex-1">{fact.title}</span>
+							{#if ws.stageByArtifact.has(fact.id)}
+								<span class="shrink-0 font-mono text-[10px] text-amber-900"
+									>S{ws.stageByArtifact.get(fact.id)}</span
+								>
+							{/if}
+							{#if fact.status !== 'ACCEPTED'}
+								<span class="shrink-0 text-[10px]">{fact.status.toLowerCase()}</span>
+							{/if}
+						</button>
+					</li>
+				{/each}
+			</ul>
+		</aside>
+	{/if}
 	{#if compositeRows.length > 0}
 		<section class="mb-6" aria-label="Composites">
 			<h3 class="section-title mb-1.5">Composites</h3>

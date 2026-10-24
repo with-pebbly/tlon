@@ -12,6 +12,15 @@ import {
 	type DisclosureList,
 	type ExpansionDetail,
 	type ExportBundle,
+	type FactAnchor,
+	type FactRationale,
+	type ParticipantLink,
+	type ProtocolState,
+	type Run,
+	type SubmitTaskResult,
+	type TaskList,
+	type TaskView,
+	type TriangleDetail,
 	type Grant,
 	type GrantList,
 	type ImportResult,
@@ -37,6 +46,7 @@ import { expansionMethods } from './expansions.ts';
 import { gatewayMethods } from './gateway.ts';
 import { auditDecision, createCtx, type Ctx, type ServiceOptions } from './internal.ts';
 import { projectMethods } from './projects.ts';
+import { protocolMethods } from './protocol.ts';
 import { relationMethods } from './relations.ts';
 import { projects } from './schema.ts';
 import { validationMethods } from './validation.ts';
@@ -196,6 +206,59 @@ export interface TlonService {
 	): Promise<Disclosure>;
 
 	listOwnAudit(principal: Principal, projectId: string, query?: unknown): Promise<AuditPage>;
+
+	/** Principal + link token in one call (facilitator). Executor kind never changes permissions. */
+	createParticipant(
+		principal: Principal,
+		projectId: string,
+		input: unknown
+	): Promise<ParticipantLink>;
+	/** Creates the run and the two side `seed_block` tasks (facilitator). */
+	startRun(principal: Principal, projectId: string, input: unknown): Promise<Run>;
+	listRuns(principal: Principal, projectId: string): Promise<{ items: Run[] }>;
+	/** HUMAN: all; C: triangles + its tasks; VALIDATOR: triangles; A/B: FORBIDDEN. */
+	getProtocol(principal: Principal, projectId: string): Promise<ProtocolState>;
+	/** Facilitator view of every task. */
+	listTasks(principal: Principal, projectId: string): Promise<TaskList>;
+	/** A/B/C: pending/submitted tasks assigned to the caller or claimable by its role. */
+	listMyTasks(principal: Principal, projectId: string): Promise<TaskList>;
+	getTaskView(principal: Principal, projectId: string, taskId: string): Promise<TaskView>;
+	/** Idempotent by `idempotencyKey`; claims the task for the submitter. */
+	submitTask(
+		principal: Principal,
+		projectId: string,
+		taskId: string,
+		input: unknown
+	): Promise<SubmitTaskResult>;
+	/** Opens a gap between two anchors → a `propose_fact` task for C. */
+	connect(principal: Principal, projectId: string, input: unknown): Promise<TriangleDetail>;
+	getTriangle(principal: Principal, projectId: string, triangleId: string): Promise<TriangleDetail>;
+	/** Facilitator, or C when the run's policy is `mediator`. */
+	acceptFact(
+		principal: Principal,
+		projectId: string,
+		triangleId: string,
+		input: unknown
+	): Promise<TriangleDetail>;
+	setTriangleStatus(
+		principal: Principal,
+		projectId: string,
+		triangleId: string,
+		input: unknown
+	): Promise<TriangleDetail>;
+	createFactAnchor(principal: Principal, projectId: string, input: unknown): Promise<FactAnchor>;
+	composeTriangle(
+		principal: Principal,
+		projectId: string,
+		triangleId: string,
+		input: unknown
+	): Promise<CompositeView>;
+	/** HUMAN/C only: the mediator-private rationale of one Fact. */
+	getFactRationale(
+		principal: Principal,
+		projectId: string,
+		factArtifactId: string
+	): Promise<FactRationale>;
 }
 
 type Method = (principal: Principal, ...args: unknown[]) => Promise<unknown>;
@@ -225,7 +288,11 @@ async function recordRefusal(
 	if (error.code === 'FORBIDDEN') outcome = 'DENIED';
 	else if (
 		principal.kind === 'AGENT' &&
-		(error.code === 'ARTIFACT_NOT_FOUND' || error.code === 'PROJECT_NOT_FOUND')
+		(error.code === 'ARTIFACT_NOT_FOUND' ||
+			error.code === 'PROJECT_NOT_FOUND' ||
+			error.code === 'TASK_NOT_FOUND' ||
+			error.code === 'TRIANGLE_NOT_FOUND' ||
+			error.code === 'RUN_NOT_FOUND')
 	) {
 		outcome = 'HIDDEN';
 	} else return;
@@ -261,7 +328,8 @@ export function createTlonService(db: Db, options: ServiceOptions = {}): TlonSer
 		...expansionMethods(ctx),
 		...bundleMethods(ctx),
 		...validationMethods(ctx),
-		...gatewayMethods(ctx)
+		...gatewayMethods(ctx),
+		...protocolMethods(ctx)
 	};
 	const audited: Record<string, unknown> = {};
 	for (const [name, method] of Object.entries(methods) as Array<[string, Method]>) {

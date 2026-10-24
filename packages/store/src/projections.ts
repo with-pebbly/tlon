@@ -1,7 +1,9 @@
 import {
 	type Artifact,
+	type ArtifactClass,
 	type ArtifactKind,
 	type ArtifactRevision,
+	type FactKind,
 	type ArtifactSnapshot,
 	type ArtifactStatus,
 	type Expansion,
@@ -76,6 +78,8 @@ export function toArtifact(row: ArtifactRow, version: number): Artifact {
 		projectId: row.projectId,
 		kind: row.kind as ArtifactKind,
 		composition: row.composition as Composition,
+		artifactClass: row.artifactClass as ArtifactClass,
+		factKind: row.factKind as FactKind | null,
 		title: row.title,
 		body: row.body,
 		structured: row.structured,
@@ -95,6 +99,8 @@ export function snapshotOf(row: ArtifactRow): ArtifactSnapshot {
 	return {
 		kind: row.kind as ArtifactKind,
 		composition: row.composition as Composition,
+		artifactClass: row.artifactClass as ArtifactClass,
+		factKind: row.factKind as FactKind | null,
 		title: row.title,
 		body: row.body,
 		structured: row.structured,

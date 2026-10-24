@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { ISSUE_TONE_TITLE, toneRing } from '$lib/continuity';
 	import type { PyramidFlowNode } from '$lib/graph/types';
+	import { FACT_KIND_ICON, shortFact } from '$lib/protocol';
 	import { getWorkspace } from '$lib/state/context';
 	import { SCOPE_CORNER, SCOPE_LABEL } from '$lib/ui';
 	import { Handle, Position, type NodeProps } from '@xyflow/svelte';
@@ -10,16 +11,21 @@
 	const ws = getWorkspace();
 
 	const artifact = $derived(data.artifact);
-	const corner = $derived(SCOPE_CORNER[artifact.ownerScope]);
+	const isFact = $derived(artifact.artifactClass === 'FACT');
+	const factIcon = $derived(artifact.factKind ? FACT_KIND_ICON[artifact.factKind] : '◆');
+	const corner = $derived(isFact ? null : SCOPE_CORNER[artifact.ownerScope]);
 	const roleText = $derived(
 		data.composite
 			? `composite · level ${data.composite.level} · ${data.composite.members} members — double-click to drill in`
-			: data.role === 'base'
-				? 'base line'
-				: data.role === 'loose'
-					? 'not placed (anchors hidden)'
-					: `${data.role} · depth ${data.depth}`
+			: isFact
+				? `Fact${artifact.factKind ? ` (${artifact.factKind})` : ''} · ${artifact.status.toLowerCase()}`
+				: data.role === 'base'
+					? 'base line'
+					: data.role === 'loose'
+						? 'not placed (anchors hidden)'
+						: `${data.role} · depth ${data.depth}`
 	);
+	const plain = $derived(!data.composite && !isFact);
 </script>
 
 <!--
@@ -31,21 +37,26 @@
 		'tlon-cell relative h-full w-full border',
 		data.large ? 'rounded-md px-2 py-1' : 'rounded-[3px]',
 		data.composite && 'tlon-composite-card border-2 border-zinc-700 bg-white',
-		!data.composite && data.role === 'base' && 'border-zinc-300 bg-zinc-200',
-		!data.composite && data.role === 'bridge' && 'border-accent-500 bg-accent-200',
-		!data.composite && data.role === 'candidate' && 'border-dashed border-accent-500 bg-accent-50',
-		!data.composite && data.role === 'loose' && 'border-zinc-300 bg-white',
+		isFact && 'rounded-full! border-amber-500',
+		isFact && (artifact.status === 'ACCEPTED' ? 'bg-amber-200' : 'border-dashed bg-amber-50'),
+		plain && data.role === 'base' && 'border-zinc-300 bg-zinc-200',
+		plain && data.role === 'bridge' && 'border-accent-500 bg-accent-200',
+		plain && data.role === 'candidate' && 'border-dashed border-accent-500 bg-accent-50',
+		plain && data.role === 'loose' && 'border-zinc-300 bg-white',
 		(data.category === 'rejected' || data.category === 'archived') && 'opacity-50',
-		!data.composite && data.large && data.role === 'base' && 'bg-zinc-100',
-		!data.composite && data.large && data.role === 'bridge' && 'bg-accent-50',
+		plain && data.large && data.role === 'base' && 'bg-zinc-100',
+		plain && data.large && data.role === 'bridge' && 'bg-accent-50',
 		selected && 'outline-2 outline-offset-2 outline-accent-600',
 		data.highlighted
 			? 'ring-4 ring-amber-300'
 			: toneRing(data.issue, selected, data.composite !== null)
 	]}
-	title="{artifact.title} — {roleText} · {SCOPE_LABEL[artifact.ownerScope]}{data.stale
+	title="{artifact.title} — {roleText}{data.stage !== null
+		? ` · stage ${data.stage}`
+		: ''} · {SCOPE_LABEL[artifact.ownerScope]}{data.stale
 		? ' · stale bridge: an anchor changed after acceptance'
 		: ''}{data.issue ? ` · ${ISSUE_TONE_TITLE[data.issue]}` : ''}"
+	data-artifact-class={artifact.artifactClass}
 >
 	<Handle id="c" type="source" position={Position.Top} isConnectable={false} class="tlon-anchor" />
 	<Handle
@@ -73,6 +84,18 @@
 			]}
 			aria-label="Stale bridge"
 		></span>
+	{/if}
+	{#if data.stage !== null}
+		<span
+			class={[
+				'absolute flex items-center justify-center rounded-full border border-zinc-400 bg-white font-mono leading-none text-zinc-700',
+				data.large
+					? '-bottom-2 -left-2 size-4 text-[9px]'
+					: '-bottom-1.5 -left-1.5 size-3 text-[7px]'
+			]}
+			aria-label="Stage {data.stage}"
+			data-testid="stage-badge">{data.stage}</span
+		>
 	{/if}
 	{#if data.composite}
 		{#if data.large}
@@ -108,6 +131,19 @@
 				}}>+</button
 			>
 			<span class="tlon-cell-label tlon-label-below">{artifact.title}</span>
+		{/if}
+	{:else if isFact}
+		<span
+			class={[
+				'flex h-full items-center gap-1 overflow-hidden leading-none text-zinc-900',
+				data.large ? 'text-[11px]' : 'justify-center text-[10px]'
+			]}
+		>
+			<span aria-hidden="true">{factIcon}</span>
+			{#if data.large}<span class="truncate font-medium">{shortFact(artifact.title, 40)}</span>{/if}
+		</span>
+		{#if !data.large}
+			<span class="tlon-cell-label tlon-label-above">{shortFact(artifact.title)}</span>
 		{/if}
 	{:else if data.large}
 		<div class="line-clamp-3 text-[12px] leading-[15px] font-medium text-zinc-800">

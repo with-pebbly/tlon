@@ -47,6 +47,9 @@ export const artifacts = pgTable(
 			.references(() => projects.id),
 		kind: text('kind').notNull(),
 		composition: text('composition').notNull().default('ATOMIC'),
+		// BLOCK (narrative segment, default for all pre-protocol rows) or FACT (mediator connector).
+		artifactClass: text('artifact_class').notNull().default('BLOCK'),
+		factKind: text('fact_kind'),
 		title: text('title').notNull(),
 		body: text('body').notNull(),
 		structured: jsonb('structured').$type<Record<string, unknown>>().notNull(),
@@ -226,6 +229,7 @@ export const agentPrincipals = pgTable(
 			.references(() => projects.id),
 		role: text('role').notNull(),
 		name: text('name').notNull(),
+		executorKind: text('executor_kind').notNull().default('ai'),
 		createdAt: ts('created_at').notNull(),
 		disabledAt: ts('disabled_at')
 	},
@@ -430,6 +434,195 @@ export const issueDismissals = pgTable(
 	(t) => [index('issue_dismissals_project_key_idx').on(t.projectId, t.issueKey)]
 );
 
+/** Mediator-private justification of a Fact; never part of the artifact or any disclosure. */
+export const factRationales = pgTable(
+	'fact_rationales',
+	{
+		factArtifactId: uuid('fact_artifact_id').primaryKey(),
+		projectId: uuid('project_id')
+			.notNull()
+			.references(() => projects.id),
+		rationale: text('rationale').notNull(),
+		createdAt: ts('created_at').notNull()
+	},
+	(t) => [
+		foreignKey({
+			name: 'fact_rationales_artifact_fk',
+			columns: [t.projectId, t.factArtifactId],
+			foreignColumns: [artifacts.projectId, artifacts.id]
+		}),
+		index('fact_rationales_project_idx').on(t.projectId)
+	]
+);
+
+/** One protocol run: config + side-private briefs (facilitator-only). */
+export const protocolRuns = pgTable(
+	'protocol_runs',
+	{
+		id: uuid('id').primaryKey(),
+		projectId: uuid('project_id')
+			.notNull()
+			.references(() => projects.id),
+		config: jsonb('config').$type<Record<string, unknown>>().notNull(),
+		status: text('status').notNull(),
+		briefs: jsonb('briefs').$type<{ A: string; B: string }>().notNull(),
+		createdAt: ts('created_at').notNull(),
+		updatedAt: ts('updated_at').notNull()
+	},
+	(t) => [
+		unique('protocol_runs_project_id_id_uq').on(t.projectId, t.id),
+		index('protocol_runs_project_idx').on(t.projectId)
+	]
+);
+
+/** Fact persisted as an anchor (§16.5): pins the exact Fact revision. */
+export const factAnchors = pgTable(
+	'fact_anchors',
+	{
+		id: uuid('id').primaryKey(),
+		projectId: uuid('project_id')
+			.notNull()
+			.references(() => projects.id),
+		factArtifactId: uuid('fact_artifact_id').notNull(),
+		factRevisionId: uuid('fact_revision_id').notNull(),
+		createdAt: ts('created_at').notNull()
+	},
+	(t) => [
+		foreignKey({
+			name: 'fact_anchors_artifact_fk',
+			columns: [t.projectId, t.factArtifactId],
+			foreignColumns: [artifacts.projectId, artifacts.id]
+		}),
+		unique('fact_anchors_project_id_id_uq').on(t.projectId, t.id),
+		index('fact_anchors_project_idx').on(t.projectId)
+	]
+);
+
+/** Two anchors + one Fact (hyperedge). The Fact is null while C's proposal is under review. */
+export const triangles = pgTable(
+	'triangles',
+	{
+		id: uuid('id').primaryKey(),
+		projectId: uuid('project_id')
+			.notNull()
+			.references(() => projects.id),
+		runId: uuid('run_id').references(() => protocolRuns.id),
+		leftArtifactId: uuid('left_artifact_id').notNull(),
+		leftRevisionId: uuid('left_revision_id').notNull(),
+		leftFactAnchorId: uuid('left_fact_anchor_id').references(() => factAnchors.id),
+		rightArtifactId: uuid('right_artifact_id').notNull(),
+		rightRevisionId: uuid('right_revision_id').notNull(),
+		rightFactAnchorId: uuid('right_fact_anchor_id').references(() => factAnchors.id),
+		factArtifactId: uuid('fact_artifact_id'),
+		factRevisionId: uuid('fact_revision_id'),
+		status: text('status').notNull(),
+		stageIndex: integer('stage_index').notNull(),
+		depth: integer('depth').notNull(),
+		parentTriangleId: uuid('parent_triangle_id'),
+		leftDirection: text('left_direction').notNull().default('forward'),
+		rightDirection: text('right_direction').notNull().default('backward'),
+		createdAt: ts('created_at').notNull(),
+		updatedAt: ts('updated_at').notNull()
+	},
+	(t) => [
+		foreignKey({
+			name: 'triangles_left_fk',
+			columns: [t.projectId, t.leftArtifactId],
+			foreignColumns: [artifacts.projectId, artifacts.id]
+		}),
+		foreignKey({
+			name: 'triangles_right_fk',
+			columns: [t.projectId, t.rightArtifactId],
+			foreignColumns: [artifacts.projectId, artifacts.id]
+		}),
+		foreignKey({
+			name: 'triangles_fact_fk',
+			columns: [t.projectId, t.factArtifactId],
+			foreignColumns: [artifacts.projectId, artifacts.id]
+		}),
+		foreignKey({
+			name: 'triangles_parent_fk',
+			columns: [t.parentTriangleId],
+			foreignColumns: [t.id]
+		}),
+		unique('triangles_project_id_id_uq').on(t.projectId, t.id),
+		index('triangles_project_idx').on(t.projectId),
+		index('triangles_run_idx').on(t.runId),
+		index('triangles_parent_idx').on(t.parentTriangleId)
+	]
+);
+
+/** One protocol task: the unit humans, AI and scripted executors claim and submit. */
+export const protocolTasks = pgTable(
+	'protocol_tasks',
+	{
+		id: uuid('id').primaryKey(),
+		projectId: uuid('project_id')
+			.notNull()
+			.references(() => projects.id),
+		runId: uuid('run_id').references(() => protocolRuns.id),
+		type: text('type').notNull(),
+		role: text('role').notNull(),
+		assigneePrincipalId: uuid('assignee_principal_id').references(() => agentPrincipals.id),
+		state: text('state').notNull(),
+		stageIndex: integer('stage_index').notNull(),
+		depth: integer('depth').notNull(),
+		triangleId: uuid('triangle_id').references(() => triangles.id),
+		side: text('side'),
+		direction: text('direction'),
+		resultRefs: jsonb('result_refs')
+			.$type<Array<{ artifactId: string; revisionId: string }>>()
+			.notNull(),
+		submitIdempotencyKey: text('submit_idempotency_key'),
+		createdAt: ts('created_at').notNull(),
+		submittedAt: ts('submitted_at')
+	},
+	(t) => [
+		unique('protocol_tasks_project_idempotency_uq').on(t.projectId, t.submitIdempotencyKey),
+		index('protocol_tasks_project_idx').on(t.projectId, t.state),
+		index('protocol_tasks_role_idx').on(t.projectId, t.role, t.state),
+		index('protocol_tasks_triangle_idx').on(t.triangleId),
+		index('protocol_tasks_assignee_idx').on(t.assigneePrincipalId)
+	]
+);
+
+/** Blocks written by the two sides from the accepted Fact (several per side are allowed). */
+export const triangleContinuations = pgTable(
+	'triangle_continuations',
+	{
+		triangleId: uuid('triangle_id')
+			.notNull()
+			.references(() => triangles.id),
+		side: text('side').notNull(),
+		artifactId: uuid('artifact_id').notNull(),
+		revisionId: uuid('revision_id').notNull(),
+		taskId: uuid('task_id').references(() => protocolTasks.id)
+	},
+	(t) => [
+		primaryKey({ columns: [t.triangleId, t.side, t.artifactId] }),
+		index('triangle_continuations_artifact_idx').on(t.artifactId)
+	]
+);
+
+/** C's Fact proposals for a Triangle; each candidate is itself a PROPOSED Fact artifact. */
+export const factCandidates = pgTable(
+	'fact_candidates',
+	{
+		id: uuid('id').primaryKey(),
+		triangleId: uuid('triangle_id')
+			.notNull()
+			.references(() => triangles.id),
+		factArtifactId: uuid('fact_artifact_id').notNull(),
+		factRevisionId: uuid('fact_revision_id').notNull(),
+		status: text('status').notNull(),
+		createdAt: ts('created_at').notNull()
+	},
+	(t) => [
+		unique('fact_candidates_triangle_artifact_uq').on(t.triangleId, t.factArtifactId),
+		index('fact_candidates_triangle_idx').on(t.triangleId)
+	]
+);
+
 export type CompositeDefinitionRow = typeof compositeDefinitions.$inferSelect;
 export type CompositeMemberRow = typeof compositeMembers.$inferSelect;
 
@@ -444,3 +637,8 @@ export type GrantRow = typeof grants.$inferSelect;
 export type DisclosureRow = typeof disclosures.$inferSelect;
 export type TransitionAnnotationRow = typeof transitionAnnotations.$inferSelect;
 export type IssueDismissalRow = typeof issueDismissals.$inferSelect;
+export type ProtocolRunRow = typeof protocolRuns.$inferSelect;
+export type ProtocolTaskRow = typeof protocolTasks.$inferSelect;
+export type TriangleRow = typeof triangles.$inferSelect;
+export type FactCandidateRow = typeof factCandidates.$inferSelect;
+export type FactAnchorRow = typeof factAnchors.$inferSelect;

@@ -13,17 +13,23 @@ import { Uuid } from './models.ts';
 
 const IsoDate = z.iso.datetime({ offset: true });
 
-// ── Fact policy (§4.1) ──────────────────────────────────────────────────────
+// ── Fact policy (owner decision 2026-10-25, overrides RFC §4.1's 3–12 words) ───
 
-/** Hard cap on shareable Fact text (characters, language-agnostic). */
-export const FACT_MAX_CHARS = 160;
-/** Advisory preferred word range for space-delimited languages. */
-export const FACT_PREFERRED_WORDS = { min: 3, max: 12 } as const;
+/**
+ * A Fact is a couple of words: a bare circumstance with no qualifiers or explanation.
+ * "Корни хранят память" is a Fact; "В корнях обнаружена неизвестная система хранения
+ * памяти" is not.
+ */
+export const FACT_MAX_WORDS = 4;
+/** Preferred size: two or three words. */
+export const FACT_PREFERRED_WORDS = { min: 2, max: 3 } as const;
+/** Hard character cap for scripts without spaces (and a backstop for long words). */
+export const FACT_MAX_CHARS = 48;
 
 export type FactLint = {
-	/** Submit-time blockers: over the hard cap, empty, several sentences. */
+	/** Submit-time blockers: empty, too many words/characters, clauses or sentences. */
 	errors: string[];
-	/** Advisory: length outside preferred range, reads like a plot instruction. */
+	/** Advisory: more than the preferred words, reads like an instruction. */
 	warnings: string[];
 };
 
@@ -37,42 +43,47 @@ const DIRECTIVE_MARKERS = [
 	/\bwill\b/i,
 	/\bthen\b/i,
 	/\bfinally\b/i,
-	/\bin order to\b/i,
 	/\bconvinc/i,
 	/\bdecides?\b/i,
 	/\bdiscovers?\b/i,
-	/\bдолж/i,
-	/\bзатем\b/i,
-	/\bпотом\b/i,
-	/\bв итоге\b/i,
-	/\bчтобы\b/i
+	/(^|\s)долж/i,
+	/(^|\s)затем(\s|$)/i,
+	/(^|\s)потом(\s|$)/i,
+	/(^|\s)чтобы(\s|$)/i,
+	/(^|\s)обнаруж/i
 ];
 
 /**
- * Language-aware-enough Fact lint (§4.1): character hard cap, single statement,
- * advisory word range and directive markers. Used by the API at submit time and by
- * editors while drafting.
+ * Fact lint used by the API at submit time and by editors while drafting: at most
+ * FACT_MAX_WORDS words and FACT_MAX_CHARS characters, one bare statement (no clauses
+ * split by , ; : or sentence punctuation), with advisory warnings above
+ * FACT_PREFERRED_WORDS.max words or for instruction-like phrasing.
  */
 export function lintFactText(raw: string): FactLint {
-	const text = raw.trim();
+	const text = raw.trim().replace(/[.!…]+$/u, '');
 	const errors: string[] = [];
 	const warnings: string[] = [];
 	if (text.length === 0) errors.push('A Fact needs text.');
+	const words = text.split(/\s+/).filter(Boolean).length;
+	if (words > FACT_MAX_WORDS) {
+		errors.push(
+			`A Fact is a couple of words — at most ${FACT_MAX_WORDS} (now ${words}). Drop qualifiers and explanations.`
+		);
+	}
 	if ([...text].length > FACT_MAX_CHARS) {
 		errors.push(`A Fact is at most ${FACT_MAX_CHARS} characters (now ${[...text].length}).`);
 	}
-	// More than one sentence terminator followed by more text → an outline, not a circumstance.
-	if (/[.!?…]\s+\S/.test(text))
-		errors.push('One short statement only — this reads as several sentences.');
-	const words = text.split(/\s+/).filter(Boolean).length;
-	if (/\s/.test(text) && (words < FACT_PREFERRED_WORDS.min || words > FACT_PREFERRED_WORDS.max)) {
+	if (/[,;:.!?…—()]/u.test(text)) {
+		errors.push('One bare statement only — no clauses, lists or punctuation inside.');
+	}
+	if (errors.length === 0 && words > FACT_PREFERRED_WORDS.max) {
 		warnings.push(
 			`Prefer ${FACT_PREFERRED_WORDS.min}–${FACT_PREFERRED_WORDS.max} words (now ${words}).`
 		);
 	}
 	if (DIRECTIVE_MARKERS.some((re) => re.test(text))) {
 		warnings.push(
-			'This reads like a plot instruction; make it an open circumstance (an object, trace, rule, need…).'
+			'This reads like a plot instruction; make it a bare circumstance (“корни хранят память”).'
 		);
 	}
 	return { errors, warnings };
@@ -118,6 +129,9 @@ export const FactAnchor = z.object({
 });
 export type FactAnchor = z.infer<typeof FactAnchor>;
 
+export const Direction = z.enum(['forward', 'backward', 'atemporal']);
+export type Direction = z.infer<typeof Direction>;
+
 /** Endpoint of a Triangle: a Block revision, or a Fact used through a FactAnchor. */
 export const AnchorRef = RevisionRef.extend({ factAnchorId: Uuid.nullable() });
 export type AnchorRef = z.infer<typeof AnchorRef>;
@@ -146,6 +160,8 @@ export const Triangle = z.object({
 	/** Expansion hierarchy: 1 for a root gap, parent + 1 for a child gap. */
 	depth: z.int().min(1),
 	parentTriangleId: Uuid.nullable(),
+	/** How each side continues its anchor once the Fact is accepted (§1.3); omitted = forward/backward. */
+	advance: z.object({ left: Direction, right: Direction }).optional(),
 	continuations: z.array(TriangleContinuation),
 	createdAt: IsoDate,
 	updatedAt: IsoDate
@@ -161,6 +177,8 @@ export const FactCandidate = z.object({
 	text: z.string(),
 	status: z.enum(['proposed', 'accepted', 'rejected']),
 	lint: z.object({ errors: z.array(z.string()), warnings: z.array(z.string()) }),
+	/** Mediator-private justification; only principals holding `fact.rationale.read` receive it. */
+	rationale: z.string().nullable().default(null),
 	createdAt: IsoDate
 });
 export type FactCandidate = z.infer<typeof FactCandidate>;
@@ -180,9 +198,6 @@ export type TaskType = z.infer<typeof TaskType>;
 export const TASK_STATES = ['pending', 'submitted', 'approved', 'rejected', 'cancelled'] as const;
 export const TaskState = z.enum(TASK_STATES);
 export type TaskState = z.infer<typeof TaskState>;
-
-export const Direction = z.enum(['forward', 'backward', 'atemporal']);
-export type Direction = z.infer<typeof Direction>;
 
 /** Who accepts C's Fact candidates: the facilitator (default, §16.1) or C itself. */
 export const FactReviewPolicy = z.enum(['facilitator', 'mediator']);
@@ -277,6 +292,7 @@ export const TaskView = z.discriminatedUnion('type', [
 		/** Facts already used between these anchors (avoid repeating). */
 		existingFacts: z.array(FactView),
 		policy: z.object({
+			maxWords: z.int(),
 			maxChars: z.int(),
 			preferredWords: z.object({ min: z.int(), max: z.int() }),
 			maxCandidates: z.int()
@@ -365,3 +381,39 @@ export const ProtocolState = z.object({
 	factAnchors: z.array(FactAnchor)
 });
 export type ProtocolState = z.infer<typeof ProtocolState>;
+
+/** `POST /participants` (facilitator): principal + link token in one call. */
+export const CreateParticipantInput = z.object({
+	role: AgentRole,
+	name: z.string().trim().min(1).max(100),
+	executorKind: ExecutorKind.default('human'),
+	/** Link lifetime; defaults to 24 h, at most a week. */
+	ttlSeconds: z
+		.int()
+		.min(60)
+		.max(7 * 24 * 60 * 60)
+		.optional()
+});
+export type CreateParticipantInput = z.input<typeof CreateParticipantInput>;
+
+export const CreateFactAnchorInput = z.object({ factArtifactId: Uuid });
+export type CreateFactAnchorInput = z.input<typeof CreateFactAnchorInput>;
+
+export const SetTriangleStatusInput = z.object({
+	status: z.enum(['validated', 'rejected', 'superseded'])
+});
+export type SetTriangleStatusInput = z.input<typeof SetTriangleStatusInput>;
+
+export const ComposeTriangleInput = z.object({
+	title: z.string().trim().min(1).max(300),
+	summary: z.string().trim().max(8000).optional()
+});
+export type ComposeTriangleInput = z.input<typeof ComposeTriangleInput>;
+
+/** Mediator-private rationale of one Fact (`fact.rationale.read`). */
+export const FactRationale = z.object({
+	factArtifactId: Uuid,
+	rationale: z.string(),
+	createdAt: IsoDate
+});
+export type FactRationale = z.infer<typeof FactRationale>;

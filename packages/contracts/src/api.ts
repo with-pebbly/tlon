@@ -2,7 +2,9 @@ import { z } from 'zod';
 
 import { CompositeDefinitionRecord, CompositeSummary } from './composites.ts';
 import {
+	ArtifactClass,
 	ArtifactKind,
+	FactKind,
 	ArtifactStatus,
 	OwnerScope,
 	ProjectDomain,
@@ -20,6 +22,7 @@ import {
 	Relation,
 	Uuid
 } from './models.ts';
+import { FactCandidate, FactAnchor, FactRationale, Run, Task, Triangle } from './protocol.ts';
 import { BridgeStructured, StructuredRecord } from './structured.ts';
 import { Transition, TransitionAnnotation, ValidationIssue } from './validation.ts';
 
@@ -51,6 +54,9 @@ export type ProjectList = z.infer<typeof ProjectList>;
 
 export const CreateArtifactInput = z.object({
 	kind: ArtifactKind,
+	/** FACT (HUMAN only): `title` is the Fact text (a couple of words, see lintFactText), `body` stays empty, `factKind` is required. */
+	artifactClass: ArtifactClass.default('BLOCK'),
+	factKind: FactKind.optional(),
 	title: Title,
 	body: Body.default(''),
 	structured: StructuredRecord.default({}),
@@ -66,6 +72,7 @@ export type CreateArtifactInput = z.input<typeof CreateArtifactInput>;
 export const UpdateArtifactInput = z
 	.object({
 		kind: ArtifactKind.optional(),
+		factKind: FactKind.optional(),
 		title: Title.optional(),
 		body: Body.optional(),
 		structured: StructuredRecord.optional(),
@@ -250,7 +257,14 @@ export const ExportBundle = z.object({
 	/** Every composite definition revision (additive in v1; absent in older bundles). */
 	compositeDefinitions: z.array(CompositeDefinitionRecord).default([]),
 	/** Every state annotation (additive in v1). */
-	transitions: z.array(TransitionAnnotation).default([])
+	transitions: z.array(TransitionAnnotation).default([]),
+	/** Block–Fact protocol state (additive; absent in older bundles, treated as empty). */
+	runs: z.array(Run).optional(),
+	triangles: z.array(Triangle).optional(),
+	tasks: z.array(Task).optional(),
+	factCandidates: z.array(FactCandidate).optional(),
+	factRationales: z.array(FactRationale).optional(),
+	factAnchors: z.array(FactAnchor).optional()
 });
 export type ExportBundle = z.infer<typeof ExportBundle>;
 

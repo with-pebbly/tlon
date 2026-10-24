@@ -26,6 +26,13 @@ import {
 	toRevision
 } from './projections.ts';
 import {
+	findProtocolIntegrityIssues,
+	insertProtocolImport,
+	loadProtocolExport,
+	protocolIdChecks,
+	protocolPart
+} from './protocol.ts';
+import {
 	artifactRevisions,
 	artifacts,
 	compositeDefinitions,
@@ -128,7 +135,8 @@ export function bundleMethods(ctx: Ctx) {
 					transitionAnnotations,
 					transitionAnnotations.id,
 					data.transitions.map((t) => t.id)
-				]
+				],
+				...protocolIdChecks(protocolPart(data))
 			];
 			for (const [entity, table, column, ids] of checks) {
 				const clashes = await countExisting(tx, table, column, ids);
@@ -152,6 +160,8 @@ export function bundleMethods(ctx: Ctx) {
 					projectId,
 					kind: a.kind,
 					composition: a.composition,
+					artifactClass: a.artifactClass,
+					factKind: a.factKind,
 					title: a.title,
 					body: a.body,
 					structured: a.structured,
@@ -247,6 +257,11 @@ export function bundleMethods(ctx: Ctx) {
 			);
 		}
 		await insertImportedDefinitions(tx, projectId, data.compositeDefinitions);
+		await insertProtocolImport(ctx, tx, projectId, protocolPart(data), {
+			artifacts: new Map(parsed.artifacts.map((a, i) => [a.id, data.artifacts[i]?.id ?? a.id])),
+			revisions: new Map(parsed.revisions.map((r, i) => [r.id, data.revisions[i]?.id ?? r.id])),
+			remap: remapIds
+		});
 		await tx
 			.update(projects)
 			.set({ settings: parsed.project.settings, updatedAt: ctx.now() })
@@ -304,7 +319,8 @@ export function bundleMethods(ctx: Ctx) {
 					artifactList,
 					relationList
 				),
-				transitions: await loadAllAnnotations(ctx, db, principal, projectId)
+				transitions: await loadAllAnnotations(ctx, db, principal, projectId),
+				...(await loadProtocolExport(ctx, db, principal, projectId))
 			};
 		},
 
@@ -316,7 +332,7 @@ export function bundleMethods(ctx: Ctx) {
 			assertAllowed(principal, 'import');
 			const { name, remapIds } = parseInput(ImportAsNewProjectOptions, options);
 			const parsed = parseBundle(bundle);
-			const issues = findBundleIntegrityIssues(parsed);
+			const issues = [...findBundleIntegrityIssues(parsed), ...findProtocolIntegrityIssues(parsed)];
 			if (issues.length > 0) {
 				throw new TlonError('MISSING_REFERENCE', 'export bundle has broken references', issues);
 			}
@@ -365,7 +381,7 @@ export function bundleMethods(ctx: Ctx) {
 			await authorize(db, principal, projectId, 'import');
 			const { remapIds } = parseInput(ImportOptions, options);
 			const parsed = parseBundle(bundle);
-			const issues = findBundleIntegrityIssues(parsed);
+			const issues = [...findBundleIntegrityIssues(parsed), ...findProtocolIntegrityIssues(parsed)];
 			if (issues.length > 0) {
 				throw new TlonError('MISSING_REFERENCE', 'export bundle has broken references', issues);
 			}

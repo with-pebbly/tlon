@@ -52,7 +52,7 @@ export const Artifact = z.object({
 	/**
 	 * BLOCK = a narrative point/segment (atomic or composite; legacy full-scene bridges
 	 * are Blocks). FACT = a minimal, open connector authored by the mediator C
-	 * (BLOCK_FACT §0.1/§4.1): its whole shareable content is `title` (≤ 160 chars).
+	 * (BLOCK_FACT §0.1/§4.1): its whole shareable content is `title` (a couple of words, `lintFactText`).
 	 */
 	artifactClass: ArtifactClass.default('BLOCK'),
 	factKind: FactKind.nullable().default(null),

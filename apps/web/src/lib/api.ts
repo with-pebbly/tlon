@@ -46,7 +46,20 @@ import {
 	type IssueTokenInput,
 	type ProposeDisclosureInput,
 	type ReviewDisclosureInput,
-	type WhoAmI
+	type WhoAmI,
+	type AgentRole,
+	type ConnectInput,
+	type ExecutorKind,
+	type ParticipantLink,
+	type ProtocolState,
+	type Run,
+	type StartRunInput,
+	type SubmitTaskInput,
+	type SubmitTaskResult,
+	type TaskList,
+	type TaskView,
+	type TriangleDetail,
+	type TriangleStatus
 } from '@tlon/contracts';
 
 /** Client-side codes for failures that never reached a well-formed API error body. */
@@ -73,6 +86,16 @@ export class ApiError extends Error {
 
 export const isApiError = (value: unknown): value is ApiError => value instanceof ApiError;
 
+/**
+ * Participant mode (`/p`): every request carries this bearer token. The operator
+ * workspace never sets it (local HUMAN), so the token stays scoped to the page using it.
+ */
+let bearerToken: string | null = null;
+
+export function setBearerToken(token: string | null) {
+	bearerToken = token;
+}
+
 type RequestOptions = {
 	method?: 'GET' | 'POST' | 'PATCH' | 'PUT';
 	body?: unknown;
@@ -90,6 +113,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 	}
 	const headers: Record<string, string> = { accept: 'application/json', ...options.headers };
 	if (options.body !== undefined) headers['content-type'] = 'application/json';
+	if (bearerToken !== null) headers.authorization = `Bearer ${bearerToken}`;
 
 	let response: Response;
 	try {
@@ -295,5 +319,55 @@ export const api = {
 		request<Artifact>(`${p(projectId)}/composites/${id(compositeId)}/archive`, {
 			method: 'POST',
 			body: reason ? { reason } : {}
-		})
+		}),
+
+	// ── Block–Fact protocol ─────────────────────────────────────────────────────
+
+	/** Creates a participant principal and its link token in one call (HUMAN). */
+	createParticipant: (
+		projectId: string,
+		input: { role: AgentRole; name: string; executorKind: ExecutorKind; ttlSeconds?: number }
+	) => request<ParticipantLink>(`${p(projectId)}/participants`, { method: 'POST', body: input }),
+	startRun: (projectId: string, input: StartRunInput) =>
+		request<Run>(`${p(projectId)}/runs`, { method: 'POST', body: input }),
+	/** Filtered per caller: runs for HUMAN only, C sees triangles and tasks of its role. */
+	getProtocol: (projectId: string) => request<ProtocolState>(`${p(projectId)}/protocol`),
+	/** Pending/submitted tasks assigned to the caller or claimable for its role (A/B/C). */
+	listMyTasks: (projectId: string) => request<TaskList>(`${p(projectId)}/tasks/mine`),
+	getTaskView: (projectId: string, taskId: string) =>
+		request<TaskView>(`${p(projectId)}/tasks/${id(taskId)}/view`),
+	submitTask: (projectId: string, taskId: string, input: SubmitTaskInput) =>
+		request<SubmitTaskResult>(`${p(projectId)}/tasks/${id(taskId)}/submit`, {
+			method: 'POST',
+			body: input
+		}),
+	getTriangle: (projectId: string, triangleId: string) =>
+		request<TriangleDetail>(`${p(projectId)}/triangles/${id(triangleId)}`),
+	acceptFact: (projectId: string, triangleId: string, candidateId: string) =>
+		request<TriangleDetail>(`${p(projectId)}/triangles/${id(triangleId)}/accept-fact`, {
+			method: 'POST',
+			body: { candidateId }
+		}),
+	setTriangleStatus: (
+		projectId: string,
+		triangleId: string,
+		status: Extract<TriangleStatus, 'validated' | 'rejected' | 'superseded'>
+	) =>
+		request<TriangleDetail>(`${p(projectId)}/triangles/${id(triangleId)}/status`, {
+			method: 'POST',
+			body: { status }
+		}),
+	/** Composes the triangle (anchors, Fact, continuations) into one composite. */
+	composeTriangle: (
+		projectId: string,
+		triangleId: string,
+		input: { title: string; summary?: string }
+	) =>
+		request<CompositeView>(`${p(projectId)}/triangles/${id(triangleId)}/compose`, {
+			method: 'POST',
+			body: input
+		}),
+	/** Opens a gap between two anchors: a proposed triangle plus a propose_fact task for C. */
+	connect: (projectId: string, input: ConnectInput) =>
+		request<TriangleDetail>(`${p(projectId)}/connect`, { method: 'POST', body: input })
 };

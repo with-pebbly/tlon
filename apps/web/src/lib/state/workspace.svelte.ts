@@ -41,7 +41,17 @@ import {
 	type DismissIssueInput,
 	type IssueList,
 	type TransitionInput,
-	type ValidationIssue
+	type ValidationIssue,
+	type AgentRole,
+	type ConnectInput,
+	type ExecutorKind,
+	type ParticipantLink,
+	type ProtocolState,
+	type Run,
+	type StartRunInput,
+	type Triangle,
+	type TriangleDetail,
+	type TriangleStatus
 } from '@tlon/contracts';
 import {
 	buildFractalTree,
@@ -59,7 +69,7 @@ import { SvelteSet } from 'svelte/reactivity';
 export const UNANNOTATED_LABEL = 'unannotated beats';
 
 /** 'aggregate' = a virtual `agg:<from>:<to>` edge standing in for hidden relations. */
-export type SelectionType = 'artifact' | 'relation' | 'expansion' | 'aggregate';
+export type SelectionType = 'artifact' | 'relation' | 'expansion' | 'aggregate' | 'triangle';
 export type Selection = { type: SelectionType; id: string } | null;
 export type ViewName = 'graph' | 'fractal' | 'timeline';
 
@@ -68,7 +78,8 @@ const SELECTION_TYPE: Record<string, SelectionType> = {
 	artifact: 'artifact',
 	relation: 'relation',
 	expansion: 'expansion',
-	aggregate: 'aggregate'
+	aggregate: 'aggregate',
+	triangle: 'triangle'
 };
 
 /** Parses the `sel=<type>:<id>` URL parameter. */
@@ -185,6 +196,12 @@ export class Workspace {
 	artifactTab = $state<'details' | 'state'>('details');
 	/** Open "Compare neighbours" view: the centre beat and the state key to highlight. */
 	compare = $state.raw<{ artifactId: string; stateKey: string | null } | null>(null);
+
+	/** Block–Fact protocol state (`GET /protocol`), loaded beside the graph. */
+	protocol = $state.raw<ProtocolState | null>(null);
+	protocolError = $state.raw<ApiError | null>(null);
+	/** Candidates and tasks per triangle (`GET /triangles/:id`), refreshed with the protocol. */
+	triangleDetails = $state.raw(new Map<string, TriangleDetail>());
 
 	/** Idempotency keys for accept requests not yet confirmed by the server. */
 	#acceptKeys = new Map<string, string>();
@@ -376,8 +393,59 @@ export class Workspace {
 		)
 	);
 
+	// ── Block–Fact protocol ─────────────────────────────────────────────────────
+
+	runs = $derived<Run[]>(this.protocol?.runs ?? []);
+	triangles = $derived<Triangle[]>(this.protocol?.triangles ?? []);
+	tasks = $derived(this.protocol?.tasks ?? []);
+	trianglesById = $derived(new Map(this.triangles.map((t) => [t.id, t])));
+
+	/**
+	 * Generation stage per artifact: the stage of the task that produced it (seed = 1),
+	 * for a Fact the stage of its triangle. Blocks made outside the protocol have none.
+	 */
+	stageByArtifact = $derived.by(() => {
+		const map = new Map<string, number>();
+		for (const task of this.tasks) {
+			for (const ref of task.resultRefs) map.set(ref.artifactId, task.stageIndex);
+		}
+		for (const t of this.triangles) {
+			if (t.fact) map.set(t.fact.artifactId, t.stageIndex);
+		}
+		return map;
+	});
+
+	/** Triangles an artifact takes part in: as an anchor, the Fact, a candidate or a continuation. */
+	trianglesByArtifact = $derived.by(() => {
+		const map = new Map<string, Triangle[]>();
+		const add = (id: string, t: Triangle) => {
+			const list = map.get(id) ?? [];
+			if (!list.includes(t)) list.push(t);
+			map.set(id, list);
+		};
+		for (const t of this.triangles) {
+			add(t.left.artifactId, t);
+			add(t.right.artifactId, t);
+			if (t.fact) add(t.fact.artifactId, t);
+			for (const c of t.continuations) add(c.block.artifactId, t);
+			for (const c of this.triangleDetails.get(t.id)?.candidates ?? []) add(c.fact.artifactId, t);
+		}
+		return map;
+	});
+
 	fractal = $derived(buildFractalTree({ relations: this.relations, expansions: this.expansions }));
-	timeline = $derived(buildTimeline({ relations: this.relations, expansions: this.expansions }));
+	/** FACT artifacts (Block–Fact connectors): never story beats, never on the timeline. */
+	factArtifacts = $derived(this.artifacts.filter((a) => a.artifactClass === 'FACT'));
+	factIds = $derived(new Set(this.factArtifacts.map((a) => a.id)));
+	/** Threads read through Blocks only: relations touching a Fact are atemporal. */
+	timeline = $derived(
+		buildTimeline({
+			relations: this.relations.filter(
+				(r) => !this.factIds.has(r.fromId) && !this.factIds.has(r.toId)
+			),
+			expansions: this.expansions
+		})
+	);
 	tensions = $derived(
 		detectTensions({
 			artifacts: this.artifacts,
@@ -680,7 +748,11 @@ export class Workspace {
 	async reload() {
 		this.loading = true;
 		try {
-			const [graph] = await Promise.all([api.getGraph(this.projectId), this.reloadIssues()]);
+			const [graph] = await Promise.all([
+				api.getGraph(this.projectId),
+				this.reloadIssues(),
+				this.reloadProtocol()
+			]);
 			this.graph = graph;
 			this.loadError = null;
 			this.revision++;
@@ -699,6 +771,26 @@ export class Workspace {
 			this.issuesError = null;
 		} catch (error) {
 			this.issuesError = isApiError(error) ? error : new ApiError('BAD_RESPONSE', 0, String(error));
+		}
+	}
+
+	/**
+	 * Protocol state plus every triangle's detail (candidates, tasks). A failure is kept
+	 * in `protocolError` and never blocks the graph.
+	 */
+	async reloadProtocol() {
+		try {
+			const protocol = await api.getProtocol(this.projectId);
+			const details = await Promise.all(
+				protocol.triangles.map((t) => api.getTriangle(this.projectId, t.id))
+			);
+			this.protocol = protocol;
+			this.triangleDetails = new Map(details.map((d) => [d.triangle.id, d]));
+			this.protocolError = null;
+		} catch (error) {
+			this.protocolError = isApiError(error)
+				? error
+				: new ApiError('BAD_RESPONSE', 0, String(error));
 		}
 	}
 
@@ -949,6 +1041,47 @@ export class Workspace {
 		return disclosure;
 	}
 
+	// ── Block–Fact protocol (facilitator) ───────────────────────────────────────
+
+	/** Creates a participant and its link token; the token is returned, never stored here. */
+	async createParticipant(input: {
+		role: AgentRole;
+		name: string;
+		executorKind: ExecutorKind;
+		ttlSeconds?: number;
+	}): Promise<ParticipantLink> {
+		return this.#mutateGateway(() => api.createParticipant(this.projectId, input));
+	}
+
+	startRun(input: StartRunInput): Promise<Run> {
+		return this.#mutate(() => api.startRun(this.projectId, input));
+	}
+
+	acceptFact(triangleId: string, candidateId: string): Promise<TriangleDetail> {
+		return this.#mutate(() => api.acceptFact(this.projectId, triangleId, candidateId));
+	}
+
+	setTriangleStatus(
+		triangleId: string,
+		status: Extract<TriangleStatus, 'validated' | 'rejected' | 'superseded'>
+	): Promise<TriangleDetail> {
+		return this.#mutate(() => api.setTriangleStatus(this.projectId, triangleId, status));
+	}
+
+	/** Opens a gap between two anchors (a child gap when `parentTriangleId` is set). */
+	async connect(input: ConnectInput): Promise<TriangleDetail> {
+		const detail = await this.#mutate(() => api.connect(this.projectId, input));
+		this.multi.clear();
+		return detail;
+	}
+
+	composeTriangle(
+		triangleId: string,
+		input: { title: string; summary?: string }
+	): Promise<CompositeView> {
+		return this.#mutate(() => api.composeTriangle(this.projectId, triangleId, input));
+	}
+
 	// ── UI-only actions ─────────────────────────────────────────────────────────
 
 	toggleCollapse(expansionId: string) {
@@ -1004,9 +1137,15 @@ export class Workspace {
 	selectEdge(edgeId: string) {
 		// Fanned-out copies of one edge carry a `#n` suffix.
 		const id = edgeId.split('#')[0] ?? edgeId;
-		// Synthetic triangle sides are `tri:<expansionId>:<apexId>:<anchorId>`.
-		if (id.startsWith('tri:'))
-			return this.select({ type: 'expansion', id: id.slice(4, id.indexOf(':', 4)) });
+		// Synthetic triangle sides are `tri:<expansion or triangle id>:<apexId>:<anchorId>`.
+		if (id.startsWith('tri:')) {
+			const gapId = id.slice(4, id.indexOf(':', 4));
+			return this.select({
+				type: this.trianglesById.has(gapId) ? 'triangle' : 'expansion',
+				id: gapId
+			});
+		}
+		if (id.startsWith('gap:')) return this.select({ type: 'triangle', id: id.slice(4) });
 		if (id.startsWith('agg:')) return this.select({ type: 'aggregate', id });
 		if (id.startsWith('preview:')) return;
 		return this.select({ type: 'relation', id });

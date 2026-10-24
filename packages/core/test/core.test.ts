@@ -1,4 +1,10 @@
-import { type ExportBundle, TlonError, parseStructured, type Relation } from '@tlon/contracts';
+import {
+	type ExportBundle,
+	lintFactText,
+	TlonError,
+	parseStructured,
+	type Relation
+} from '@tlon/contracts';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -601,5 +607,18 @@ describe('Block–Fact pyramid (ADR 0011)', () => {
 			(s) => s.artifact.title
 		);
 		expect(titles).toEqual(['A seed', 'A continuation', 'B continuation', 'B seed']);
+	});
+});
+
+describe('Fact policy (owner decision: a couple of words)', () => {
+	it('accepts a bare two-three word circumstance and rejects qualified explanations or outlines', () => {
+		expect(lintFactText('Корни хранят память').errors).toEqual([]);
+		expect(lintFactText('Корни хранят память.').errors).toEqual([]);
+		expect(
+			lintFactText('В корнях обнаружена неизвестная система хранения памяти').errors.length
+		).toBeGreaterThan(0);
+		expect(lintFactText('A door opens. Then a man walks in').errors.length).toBeGreaterThan(0);
+		expect(lintFactText('Ключ, письмо').errors.length).toBeGreaterThan(0);
+		expect(lintFactText('A key engraved twice').warnings).toEqual(['Prefer 2–3 words (now 4).']);
 	});
 });

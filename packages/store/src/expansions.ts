@@ -166,6 +166,22 @@ export function expansionMethods(ctx: Ctx) {
 					rightId = data.rightArtifactId as string;
 				}
 				await assertEndpointsInProject(ctx, tx, principal, projectId, [leftId, rightId]);
+				const anchorClasses = await tx
+					.select({ id: artifacts.id })
+					.from(artifacts)
+					.where(
+						and(
+							eq(artifacts.projectId, projectId),
+							inArray(artifacts.id, [leftId, rightId]),
+							eq(artifacts.artifactClass, 'FACT')
+						)
+					);
+				if (anchorClasses.length > 0) {
+					throw new TlonError(
+						'INVALID_STATE',
+						'legacy expansions cannot anchor on a Fact; use the Fact protocol (connect)'
+					);
+				}
 				if (leftId === rightId) {
 					throw new TlonError('SELF_RELATION', 'an expansion needs two different anchors', {
 						artifactId: leftId

@@ -78,6 +78,7 @@
 		base: '#d4d4d8',
 		bridge: 'var(--color-accent-500)',
 		candidate: 'var(--color-accent-200)',
+		fact: '#fbbf24',
 		loose: '#e4e4e7'
 	};
 
@@ -176,7 +177,8 @@
 					relations: ws.relations,
 					expansions: canvas.expansions,
 					composites: canvas.composites,
-					representative: canvas.representative
+					representative: canvas.representative,
+					triangles: ws.triangles
 				})
 			: null
 	);
@@ -352,7 +354,8 @@
 						highlighted: highlighted?.has(artifact.id) ?? false,
 						bridgeDepth: bridgeDepth.get(artifact.id) ?? null,
 						stale: ws.staleBridgeIds.has(artifact.id),
-						issue: nodeTones.get(artifact.id) ?? null
+						issue: nodeTones.get(artifact.id) ?? null,
+						stage: ws.stageByArtifact.get(artifact.id) ?? null
 					},
 					selected: isSelected(artifact.id),
 					...(old?.type === 'artifact' ? measured : {})
@@ -383,7 +386,8 @@
 					large,
 					composite,
 					stale: ws.staleBridgeIds.has(artifact.id),
-					issue: nodeTones.get(artifact.id) ?? null
+					issue: nodeTones.get(artifact.id) ?? null,
+					stage: ws.stageByArtifact.get(artifact.id) ?? null
 				};
 				const selected = isSelected(artifact.id);
 				// Keep the object identity of unchanged cells: Svelte Flow then skips them, so a
@@ -404,6 +408,7 @@
 					old.data.large === large &&
 					old.data.stale === data.stale &&
 					old.data.issue === data.issue &&
+					old.data.stage === data.stage &&
 					old.data.composite?.level === composite?.level &&
 					old.data.composite?.members === composite?.members
 				)
@@ -526,6 +531,7 @@
 				class: joinClass(relationClass(r, highlightRelation))
 			})),
 			...canvas.aggregatedEdges.map((e) => aggregatedEdge(e, e.id, e.fromId, e.toId)),
+			...gapEdges(false),
 			...previewEdges.map((e) => ({
 				id: e.id,
 				source: e.source,
@@ -537,6 +543,29 @@
 			}))
 		];
 	});
+
+	/**
+	 * Block–Fact gaps still waiting for their Fact: a dashed line between the two anchors
+	 * (`gap:<triangleId>`, selects the triangle). Accepted triangles are drawn by the
+	 * pyramid (apex over anchors) or, in the flow layout, by their `has_fact` relations.
+	 */
+	function gapEdges(pyramidCells: boolean): Edge[] {
+		const selection = ws.selection;
+		return ws.triangles
+			.filter((t) => t.fact === null && t.status === 'proposed')
+			.flatMap((t) =>
+				portPairs(t.left.artifactId, t.right.artifactId).map(({ source, target }, index) => ({
+					id: edgeId(`gap:${t.id}`, index),
+					source,
+					target,
+					type: pyramidCells ? 'arc' : 'labelled',
+					...(pyramidCells ? { sourceHandle: 'c', targetHandle: 't' } : {}),
+					label: 'awaiting Fact',
+					selected: selection?.type === 'triangle' && selection.id === t.id,
+					class: joinClass([pyramidCells && 'tlon-arc', 'tlon-tri tlon-tri-open tlon-gap'])
+				}))
+			);
+	}
 
 	/**
 	 * Pyramid edges: every triangle is drawn apex→left and apex→right as thin straight
@@ -552,23 +581,33 @@
 		const selection = ws.selection;
 		const highlightRelation = ws.highlight?.relationId;
 		const selectedExpansion = selection?.type === 'expansion' ? selection.id : null;
+		const selectedTriangle = selection?.type === 'triangle' ? selection.id : null;
 		const sideKey = (expansionId: string, a: string, b: string) =>
 			a < b ? `${expansionId}:${a}:${b}` : `${expansionId}:${b}:${a}`;
 		const sides = new Map<string, PyramidTriangle>();
+		/** Block–Fact sides are backed by `has_fact` relations, which carry no expansion id. */
+		const factSides = new Map<string, string>();
 		for (const t of pyramid.triangles) {
-			sides.set(sideKey(t.expansionId, t.apexId, t.leftId), t);
-			sides.set(sideKey(t.expansionId, t.apexId, t.rightId), t);
+			for (const anchor of [t.leftId, t.rightId]) {
+				const key = sideKey(t.expansionId, t.apexId, anchor);
+				sides.set(key, t);
+				if (t.source === 'triangle') factSides.set(pairKey(t.apexId, anchor), key);
+			}
 		}
 		const triangleClass = (t: PyramidTriangle) => [
 			'tlon-tri',
 			!t.accepted && 'tlon-tri-open',
-			selectedExpansion === t.expansionId && 'tlon-tri-selected'
+			(selectedExpansion === t.expansionId || selectedTriangle === t.expansionId) &&
+				'tlon-tri-selected'
 		];
 
 		const drawn = new Set<string>();
 		const out: Edge[] = [];
 		for (const r of canvas.relations) {
-			const key = r.expansionId === null ? null : sideKey(r.expansionId, r.fromId, r.toId);
+			const key =
+				r.expansionId === null
+					? (factSides.get(pairKey(r.fromId, r.toId)) ?? null)
+					: sideKey(r.expansionId, r.fromId, r.toId);
 			const side = key === null ? undefined : sides.get(key);
 			if (key !== null && side) drawn.add(key);
 			const selected = selection?.type === 'relation' && selection.id === r.id;
@@ -623,6 +662,7 @@
 				});
 			}
 		}
+		out.push(...gapEdges(true));
 		for (const e of canvas.aggregatedEdges) {
 			portPairs(e.fromId, e.toId).forEach(({ source, target }, index) => {
 				out.push(aggregatedEdge(e, edgeId(e.id, index), source, target));
@@ -732,6 +772,29 @@
 		for (const id of boxed) ws.multi.add(id);
 	}
 
+	/** Exactly two non-Fact artifacts selected: they can be connected through a C Fact. */
+	const connectPair = $derived.by(() => {
+		const [left, right, ...rest] = [...ws.multi];
+		if (left === undefined || right === undefined || rest.length > 0) return null;
+		return ws.factIds.has(left) || ws.factIds.has(right) ? null : { left, right };
+	});
+
+	/** `POST /connect`: first-selected is the left anchor; C gets a propose_fact task. */
+	async function proposeConnectingFact() {
+		if (!connectPair) return;
+		try {
+			const detail = await ws.connect({
+				left: { artifactId: connectPair.left },
+				right: { artifactId: connectPair.right },
+				...(ws.runs[0] ? { runId: ws.runs[0].id } : {})
+			});
+			toasts.push('info', 'Gap opened: C has a task to propose a Fact.');
+			await ws.select({ type: 'triangle', id: detail.triangle.id });
+		} catch (error) {
+			toasts.error(error);
+		}
+	}
+
 	function resetLayout() {
 		saved = {};
 		savePositions(ws.projectId, positionsKey, saved);
@@ -838,6 +901,14 @@
 						class="btn btn-primary btn-sm"
 						onclick={() => (ws.composeMemberIds = [...ws.multi])}>Compose selection</button
 					>
+					{#if connectPair}
+						<button
+							class="btn btn-sm border-amber-400 text-amber-900"
+							title="Open a gap between the two selected blocks: C proposes a connecting Fact"
+							disabled={ws.pending > 0}
+							onclick={proposeConnectingFact}>Propose connecting Fact</button
+						>
+					{/if}
 					<button class="btn btn-ghost btn-sm" onclick={() => ws.multi.clear()}>Clear</button>
 				</div>
 			</Panel>

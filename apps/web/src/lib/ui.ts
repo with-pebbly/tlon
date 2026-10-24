@@ -27,7 +27,7 @@ export function artifactCategory(
 }
 
 export const CATEGORY_LABEL: Record<ArtifactCategory, string> = {
-	fact: 'Semantic fact',
+	fact: 'Block (semantic artifact)',
 	explanation: 'Explanation (bridge kind)',
 	candidate: 'Unpublished candidate',
 	bridge: 'Accepted bridge',

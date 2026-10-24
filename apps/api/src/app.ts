@@ -409,6 +409,90 @@ export function buildApp({ service, logger }: BuildAppOptions): FastifyInstance 
 		)
 	);
 
+	// ── Block–Fact protocol (participant-neutral tasks) ──
+	app.post<ProjectParams>(`${project}/participants`, async (request, reply) => {
+		const link = await service.createParticipant(
+			await act(request),
+			request.params.projectId,
+			request.body
+		);
+		return reply.code(201).send(link);
+	});
+	app.get<ProjectParams>(`${project}/runs`, async (request) =>
+		service.listRuns(await act(request), request.params.projectId)
+	);
+	app.post<ProjectParams>(`${project}/runs`, async (request, reply) => {
+		const run = await service.startRun(await act(request), request.params.projectId, request.body);
+		return reply.code(201).send(run);
+	});
+	app.get<ProjectParams>(`${project}/protocol`, async (request) =>
+		service.getProtocol(await act(request), request.params.projectId)
+	);
+	app.get<ProjectParams>(`${project}/tasks`, async (request) =>
+		service.listTasks(await act(request), request.params.projectId)
+	);
+	app.get<ProjectParams>(`${project}/tasks/mine`, async (request) =>
+		service.listMyTasks(await act(request), request.params.projectId)
+	);
+	app.get<ItemParams>(`${project}/tasks/:id/view`, async (request) =>
+		service.getTaskView(await act(request), request.params.projectId, request.params.id)
+	);
+	app.post<ItemParams>(`${project}/tasks/:id/submit`, async (request) =>
+		service.submitTask(
+			await act(request),
+			request.params.projectId,
+			request.params.id,
+			request.body
+		)
+	);
+	app.post<ProjectParams>(`${project}/connect`, async (request, reply) => {
+		const detail = await service.connect(
+			await act(request),
+			request.params.projectId,
+			request.body
+		);
+		return reply.code(201).send(detail);
+	});
+	app.get<ItemParams>(`${project}/triangles/:id`, async (request) =>
+		service.getTriangle(await act(request), request.params.projectId, request.params.id)
+	);
+	app.post<ItemParams>(`${project}/triangles/:id/accept-fact`, async (request) =>
+		service.acceptFact(
+			await act(request),
+			request.params.projectId,
+			request.params.id,
+			request.body
+		)
+	);
+	app.post<ItemParams>(`${project}/triangles/:id/status`, async (request) =>
+		service.setTriangleStatus(
+			await act(request),
+			request.params.projectId,
+			request.params.id,
+			request.body
+		)
+	);
+	app.post<ItemParams>(`${project}/triangles/:id/compose`, async (request, reply) => {
+		const composite = await service.composeTriangle(
+			await act(request),
+			request.params.projectId,
+			request.params.id,
+			request.body
+		);
+		return reply.code(201).send(composite);
+	});
+	app.post<ProjectParams>(`${project}/fact-anchors`, async (request, reply) => {
+		const anchor = await service.createFactAnchor(
+			await act(request),
+			request.params.projectId,
+			request.body
+		);
+		return reply.code(201).send(anchor);
+	});
+	app.get<ItemParams>(`${project}/facts/:id/rationale`, async (request) =>
+		service.getFactRationale(await act(request), request.params.projectId, request.params.id)
+	);
+
 	app.get<ProjectParams>(`${project}/audit/own`, async (request) =>
 		service.listOwnAudit(await act(request), request.params.projectId, request.query)
 	);

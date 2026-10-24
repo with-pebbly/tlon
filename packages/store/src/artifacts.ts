@@ -8,9 +8,11 @@ import {
 	type Principal,
 	type ArtifactRevision,
 	UpdateArtifactInput,
+	type FactKind,
 	type OwnerScope,
 	type RevisionList,
-	type Role
+	type Role,
+	lintFactText
 } from '@tlon/contracts';
 import { parseStructured } from '@tlon/contracts';
 import { creationScopeFor, writableScopesFor } from '@tlon/core';
@@ -37,7 +39,15 @@ import {
 type ArtifactChange = Partial<
 	Pick<
 		ArtifactRow,
-		'kind' | 'title' | 'body' | 'structured' | 'status' | 'ownerScope' | 'locked' | 'pinned'
+		| 'kind'
+		| 'title'
+		| 'body'
+		| 'structured'
+		| 'status'
+		| 'ownerScope'
+		| 'locked'
+		| 'pinned'
+		| 'factKind'
 	>
 >;
 
@@ -98,7 +108,7 @@ export async function insertArtifact(
 		ArtifactRow,
 		'kind' | 'title' | 'body' | 'structured' | 'status' | 'ownerScope' | 'locked' | 'pinned'
 	> &
-		Partial<Pick<ArtifactRow, 'composition'>>,
+		Partial<Pick<ArtifactRow, 'composition' | 'artifactClass' | 'factKind'>>,
 	reason: string | null,
 	/** Override for artifacts authored on behalf of another role (e.g. a published disclosure is C's). */
 	creatorRole: Role = principal.role
@@ -129,6 +139,25 @@ export async function insertArtifact(
 		createdAt: now
 	});
 	return toArtifact(row, 1);
+}
+
+/**
+ * Shape rules of a FACT artifact (§4.1): the couple-of-words Fact text lives in
+ * `title`, the body stays empty and the kind is required. Violations are VALIDATION_FAILED
+ * with the lint messages (never the text itself).
+ */
+export function assertFactShape(title: string, body: string, factKind: FactKind | null): void {
+	const messages = lintFactText(title).errors;
+	if (body.trim() !== '')
+		messages.push('A Fact has no body; put the whole statement in the title.');
+	if (factKind === null) messages.push('A Fact needs a factKind.');
+	if (messages.length > 0) {
+		throw new TlonError(
+			'VALIDATION_FAILED',
+			'request validation failed',
+			messages.map((message) => ({ code: 'custom', path: ['title'], message }))
+		);
+	}
 }
 
 const escapeLike = (value: string) => value.replace(/[\\%_]/g, (c) => `\\${c}`);
@@ -199,16 +228,32 @@ export function artifactMethods(ctx: Ctx) {
 						projectId
 					});
 				}
-				const structured = guardValidation(() =>
-					parseStructured(project.domain as 'NARRATIVE' | 'GENERIC', data.kind, data.structured)
-				);
+				const isFact = data.artifactClass === 'FACT';
+				if (isFact) {
+					// Facts are authored by the protocol (C's proposals) or by the facilitator, never ad hoc by agents.
+					if (principal.kind !== 'HUMAN') {
+						throw new TlonError('FORBIDDEN', 'Facts are created through the protocol', {
+							projectId
+						});
+					}
+					assertFactShape(data.title, data.body, data.factKind ?? null);
+				} else if (data.factKind !== undefined) {
+					throw new TlonError('VALIDATION_FAILED', 'factKind is only valid for Facts');
+				}
+				const structured = isFact
+					? {}
+					: guardValidation(() =>
+							parseStructured(project.domain as 'NARRATIVE' | 'GENERIC', data.kind, data.structured)
+						);
 				const artifact = await insertArtifact(
 					ctx,
 					tx,
 					principal,
 					projectId,
 					{
-						kind: data.kind,
+						kind: isFact ? 'NOTE' : data.kind,
+						artifactClass: data.artifactClass,
+						factKind: isFact ? (data.factKind ?? null) : null,
 						title: data.title,
 						body: data.body,
 						structured,
@@ -220,7 +265,8 @@ export function artifactMethods(ctx: Ctx) {
 					data.reason ?? null
 				);
 				await audit(ctx, tx, principal, projectId, 'artifact.create', artifact.id, {
-					kind: data.kind
+					kind: data.kind,
+					artifactClass: data.artifactClass
 				});
 				return artifact;
 			});
@@ -307,12 +353,25 @@ export function artifactMethods(ctx: Ctx) {
 						);
 					}
 				}
+				const isFact = current.row.artifactClass === 'FACT';
+				if (isFact) {
+					if (fields.kind !== undefined || fields.structured !== undefined) {
+						throw new TlonError('VALIDATION_FAILED', 'a Fact has no kind or structured content');
+					}
+					assertFactShape(
+						fields.title ?? current.row.title,
+						fields.body ?? current.row.body,
+						(fields.factKind ?? current.row.factKind) as FactKind | null
+					);
+				} else if (fields.factKind !== undefined) {
+					throw new TlonError('VALIDATION_FAILED', 'factKind is only valid for Facts');
+				}
 				const next = {
 					kind: (fields.kind ?? current.row.kind) as ArtifactKind,
 					structured: fields.structured ?? current.row.structured
 				};
 				const structured =
-					fields.kind !== undefined || fields.structured !== undefined
+					!isFact && (fields.kind !== undefined || fields.structured !== undefined)
 						? guardValidation(() =>
 								parseStructured(
 									project.domain as 'NARRATIVE' | 'GENERIC',
@@ -328,6 +387,7 @@ export function artifactMethods(ctx: Ctx) {
 					current,
 					{
 						kind: next.kind,
+						factKind: fields.factKind ?? current.row.factKind,
 						title: fields.title ?? current.row.title,
 						body: fields.body ?? current.row.body,
 						structured,

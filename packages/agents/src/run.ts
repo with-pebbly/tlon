@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 /**
- * M4 runner: isolated A/B authors + C bridge coordinator over the Tlön gateway,
+ * LEGACY (ADR 0011): full-scene bridge runner, kept for pre-Block–Fact projects.
+ * New runs use protocol-run.ts. Isolated A/B authors + C bridge coordinator,
  * growing one scenario recursively until it reaches `--target` blocks.
  *
  * Each agent turn is a fresh omp SDK session with an in-memory history, a private
@@ -379,6 +380,28 @@ async function acceptReviewedBridges(
 		const pendingCandidates = detail.candidates.filter((c) => c.reviewStatus === 'PENDING');
 		const candidate = pendingCandidates[0];
 		if (!candidate) continue;
+		// A candidate the verifier could not annotate is never accepted on C's word alone.
+		if (unverified.has(candidate.artifact.id)) {
+			for (const c of pendingCandidates) {
+				await operator(
+					'POST',
+					`/projects/${projectId}/expansions/${e.id}/reject`,
+					ExpansionDetail,
+					{
+						candidateId: c.id,
+						reason: 'independent verification unavailable'
+					}
+				);
+			}
+			rejected.push({
+				expansionId: e.id,
+				relationId: e.targetRelationId,
+				title: candidate.artifact.title,
+				explanation:
+					'The independent verifier could not read this candidate; resubmit it with plainer state.'
+			});
+			continue;
+		}
 		try {
 			await operator(
 				'POST',

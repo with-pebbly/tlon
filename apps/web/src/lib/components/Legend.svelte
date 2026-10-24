@@ -61,6 +61,11 @@
 			class: 'border-dashed border-accent-500 bg-accent-50'
 		},
 		{
+			label:
+				'Fact — C’s minimal connector, apex over its two anchors (dashed: under review); number badge = stage',
+			class: 'rounded-full border-amber-500 bg-amber-200'
+		},
+		{
 			label: 'Collapsed composite — ◈ nesting level; “+” opens it, double-click drills in',
 			class: 'border-2 border-zinc-700 bg-white'
 		},
@@ -79,6 +84,11 @@
 		{ label: 'Proposed relation', dash: '5 3', color: 'var(--color-zinc-400)' },
 		{ label: 'Collapsed parent edge (expanded)', dash: '6 4', color: 'var(--color-zinc-400)' },
 		{ label: 'Candidate preview (to its anchors)', dash: '2 4', color: 'var(--color-accent-500)' },
+		{
+			label: 'Gap awaiting a Fact (Block–Fact triangle)',
+			dash: '5 4',
+			color: 'var(--color-amber-500)'
+		},
 		{ label: 'contradicts — a creative tension', dash: '', color: 'var(--color-amber-500)' },
 		{
 			label: 'aggregated (n) — virtual edge for relations inside a collapsed composite',

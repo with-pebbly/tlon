@@ -133,6 +133,39 @@ creates a revision or stales its bridges:
   (`{ key, resolution, reason }`, human only) records a resolution that sticks to the
   stable issue key across recomputation and returns the updated list.
 
+Block–Fact protocol (ADR 0011/0012; contracts in `packages/contracts/src/protocol.ts`).
+Humans, AI and scripted executors are the same kind of participant principal
+(`executorKind` is recorded, never used for permissions) and claim the same tasks:
+
+- `POST /participants` (human; `{ role, name, executorKind?, ttlSeconds? }` → `ParticipantLink`
+  with a one-time `token`, 201; default link lifetime 24 h, max 7 days). `/agents` keeps
+  working and now takes/returns `executorKind` (default `ai`).
+- `POST /runs` (`{ briefA, briefB, config? }` → `Run`, 201) creates the two `seed_block`
+  tasks; `GET /runs`, `GET /tasks` (human). Briefs and runs are facilitator-only.
+- `GET /tasks/mine` (A/B/C: assigned to me or claimable by my role; A/B get a scrubbed task
+  without run/triangle/side/stage), `GET /tasks/:id/view` (`TaskView` assembled server-side;
+  every artifact in it passes the normal visibility predicate), `POST /tasks/:id/submit`
+  (`{ submission, idempotencyKey }` → `{ task, warnings, replayed }`; claims the task; the
+  same key replays the first result). Another participant's task is `TASK_NOT_FOUND`.
+- Scheduling (`autoSchedule`): both seeds → root Triangle (stage 2, depth 1) + C's
+  `propose_fact`; accepted Fact → two `advance_block` tasks (stage + 1); both
+  continuations → Triangle `converged`.
+- `POST /triangles/:id/accept-fact` (`{ candidateId }`; human, or C when the run's
+  `factReview` is `mediator`) accepts one candidate, rejects the rest, links both anchors
+  to the Fact (`has_fact`) and discloses **only the Fact** (READ grant + a `fact_only`
+  disclosure) to the advancing side's participants.
+- `POST /connect` (human or C; `{ left, right, parentTriangleId?, runId?, advance? }`,
+  `viaFact: true` anchors a Fact through a persisted FactAnchor) opens a gap
+  (`DEPTH_LIMIT_EXCEEDED` past the run's `maxDepth`); `GET /triangles/:id`,
+  `POST /triangles/:id/status`, `POST /triangles/:id/compose` (`{ title, summary? }` →
+  `CompositeView` of anchors + Fact + continuations), `POST /fact-anchors`,
+  `GET /protocol` (human: everything; C: triangles + its tasks; VALIDATOR: triangles),
+  `GET /facts/:id/rationale` (human/C: the mediator-private justification).
+- Facts are `artifactClass: 'FACT'` artifacts (`title` = ≤ 160-char single statement,
+  empty body, `factKind`); only the protocol or a human creates them. The export bundle
+  carries optional `runs`, `triangles`, `tasks`, `factCandidates`, `factRationales` and
+  `factAnchors` (older bundles import with none; task assignees are dropped on import).
+
 ## Decisions
 
 See [docs/adr](docs/adr): stack (SvelteKit/Fastify/Node native TS), PostgreSQL +

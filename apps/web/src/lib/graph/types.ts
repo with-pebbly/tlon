@@ -16,6 +16,8 @@ export type ArtifactNodeData = {
 	stale: boolean;
 	/** Strongest open continuity issue this artifact takes part in (canvas overlay). */
 	issue: IssueTone | null;
+	/** Block–Fact generation stage of the Block/Fact (from protocol tasks), if any. */
+	stage: number | null;
 };
 
 export type ArtifactFlowNode = Node<ArtifactNodeData, 'artifact'>;
@@ -37,6 +39,8 @@ export type PyramidNodeData = {
 	stale: boolean;
 	/** Strongest open continuity issue (a collapsed composite: of its hidden members). */
 	issue: IssueTone | null;
+	/** Block–Fact generation stage of the Block/Fact (from protocol tasks), if any. */
+	stage: number | null;
 };
 
 export type PyramidFlowNode = Node<PyramidNodeData, 'cell'>;

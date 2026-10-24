@@ -31,9 +31,11 @@
   Fact), `projectFact` (FactAnchor), `compose` (existing composites; a Triangle
   selection = anchors + Fact + continuations + their relations). `collapseView` stays
   UI-only.
-- **Fact policy** (`lintFactText`): hard cap 160 characters and a single statement are
-  submit-time errors; word range and directive phrasing are warnings shown to the
-  writer/facilitator.
+- **Fact policy** (`lintFactText`, owner decision 2026-10-25 — stricter than RFC §4.1's
+  "3–12 words / 160 chars"): a Fact is **a couple of words** — more than 4 words, more
+  than 48 characters, or any clause/list punctuation inside is a submit-time error;
+  more than 3 words or instruction-like phrasing is a warning. «Корни хранят память» is
+  a Fact; «В корнях обнаружена неизвестная система хранения памяти» is not.
 - **Stage / depth / time are separate fields.** Seeds are stage 1, the first C Fact
   stage 2, continuations stage = fact stage + 1, a new gap's Fact = max(anchor stages)
   - 1. `depth` is the triangle hierarchy. Story time stays in Block contracts.
