@@ -19,9 +19,12 @@ import { storyBeats } from '@tlon/core';
 export type IssueTone = 'blocker' | 'warning' | 'gap' | 'creative' | 'info';
 
 export function issueTone(issue: Pick<ValidationIssue, 'kind' | 'severity'>): IssueTone {
+	// Same-named entities are kept distinct; the flag only informs the reader.
+	if (issue.kind === 'ambiguous_entity') return 'info';
 	if (issue.severity === 'blocker') return 'blocker';
 	if (issue.kind === 'tension' || issue.kind === 'perspective_conflict') return 'creative';
 	if (issue.kind === 'missing_transition' && issue.severity === 'warning') return 'gap';
+	if (issue.kind === 'direction_mismatch') return 'warning';
 	return issue.severity === 'warning' ? 'warning' : 'info';
 }
 
@@ -97,6 +100,7 @@ export const ISSUE_KIND_ORDER: readonly IssueKind[] = [
 	'continuity_violation',
 	'anchor_violation',
 	'temporal_order',
+	'direction_mismatch',
 	'duplicate_event',
 	'monotonic_violation',
 	'abandoned_preparation',
@@ -105,6 +109,7 @@ export const ISSUE_KIND_ORDER: readonly IssueKind[] = [
 	'tension',
 	'perspective_conflict',
 	'redundancy',
+	'ambiguous_entity',
 	'unknown'
 ];
 
@@ -120,6 +125,8 @@ export const ISSUE_KIND_LABEL: Record<IssueKind, string> = {
 	duplicate_event: 'Duplicate event',
 	monotonic_violation: 'One-way quantity reversed',
 	missing_transition: 'Gap — missing transition',
+	direction_mismatch: 'Time runs against the continuation direction',
+	ambiguous_entity: 'Same name, distinct entities',
 	unknown: 'Other'
 };
 
@@ -163,7 +170,9 @@ export const EMPTY_TRANSITION: Transition = {
 	effects: [],
 	assumptions: [],
 	events: [],
-	repeatableEvents: []
+	repeatableEvents: [],
+	entities: [],
+	functions: []
 };
 
 /** Badge of a one-way numeric quantity: ↓ may only fall, ↑ may only rise. */
@@ -182,16 +191,26 @@ export const clockOf = (minute: number) =>
 	`${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
 
 /**
- * "Day N hh:mm ±t" of a beat time, story day 0 shown as Day 1; null when the text gives
- * neither a day nor a clock time. A flashback is marked with ↶.
+ * "1958 · Day N hh:mm ±t · relative" of a beat time, story day 0 shown as Day 1; null
+ * when the text gives no year, day, clock time or relative statement. A flashback is
+ * marked with ↶. A relative statement is shown verbatim — its absolute date stays unknown.
  */
 export function formatBeatTime(time: BeatTime | undefined): string | null {
-	if (!time || (time.day === undefined && time.minute === undefined)) return null;
+	if (
+		!time ||
+		(time.year === undefined &&
+			time.day === undefined &&
+			time.minute === undefined &&
+			!time.relative)
+	)
+		return null;
 	const parts: string[] = [];
 	if (time.outOfOrder) parts.push('↶');
+	if (time.year !== undefined) parts.push(String(time.year));
 	if (time.day !== undefined) parts.push(`Day ${time.day + 1}`);
 	if (time.minute !== undefined) parts.push(clockOf(time.minute));
 	if (time.approx) parts.push(time.toleranceMinutes > 0 ? `±${time.toleranceMinutes}m` : '≈');
+	if (time.relative) parts.push(`“${time.relative}”`);
 	return parts.join(' ');
 }
 

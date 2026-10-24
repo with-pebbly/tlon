@@ -59,7 +59,15 @@ import {
 	type TaskList,
 	type TaskView,
 	type TriangleDetail,
-	type TriangleStatus
+	type TriangleStatus,
+	type AuditReport,
+	type Certification,
+	type CompletionPolicy,
+	type CompletionReport,
+	type ConnectionList,
+	type CreateConnectionInput,
+	type NarrativeConnection,
+	type UpdateConnectionInput
 } from '@tlon/contracts';
 
 /** Client-side codes for failures that never reached a well-formed API error body. */
@@ -96,6 +104,19 @@ export function setBearerToken(token: string | null) {
 	bearerToken = token;
 }
 
+/**
+ * sessionStorage key of the facilitator secret in protected mode (`TLON_OPERATOR_TOKEN`
+ * set on the server). Sent as bearer from operator pages only — never from `/p`.
+ */
+export const OPERATOR_SECRET_KEY = 'tlon:operator';
+
+/** Called when an operator-page request is refused with 401 (protected mode). */
+let onOperatorUnauthorized: (() => void) | null = null;
+
+export function setOperatorUnauthorizedHandler(handler: (() => void) | null) {
+	onOperatorUnauthorized = handler;
+}
+
 type RequestOptions = {
 	method?: 'GET' | 'POST' | 'PATCH' | 'PUT';
 	body?: unknown;
@@ -113,7 +134,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 	}
 	const headers: Record<string, string> = { accept: 'application/json', ...options.headers };
 	if (options.body !== undefined) headers['content-type'] = 'application/json';
-	if (bearerToken !== null) headers.authorization = `Bearer ${bearerToken}`;
+	const { pathname } = window.location;
+	const participantPage = pathname === '/p' || pathname.startsWith('/p/');
+	const token =
+		bearerToken ?? (participantPage ? null : sessionStorage.getItem(OPERATOR_SECRET_KEY));
+	if (token !== null) headers.authorization = `Bearer ${token}`;
 
 	let response: Response;
 	try {
@@ -140,6 +165,8 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 		}
 	}
 
+	if (response.status === 401 && bearerToken === null && !participantPage)
+		onOperatorUnauthorized?.();
 	if (!response.ok) {
 		const parsed = ApiErrorBody.safeParse(payload);
 		if (parsed.success) {
@@ -159,7 +186,8 @@ const p = (projectId: string) => `/projects/${encodeURIComponent(projectId)}`;
 const id = (value: string) => encodeURIComponent(value);
 
 export const api = {
-	health: () => request<{ ok: true }>('/health'),
+	/** `operatorTokenRequired`: protected mode — operator calls need the facilitator secret. */
+	health: () => request<{ ok: true; operatorTokenRequired: boolean }>('/health'),
 
 	listProjects: () => request<ProjectList>('/projects'),
 	createProject: (input: CreateProjectInput) =>
@@ -369,5 +397,25 @@ export const api = {
 		}),
 	/** Opens a gap between two anchors: a proposed triangle plus a propose_fact task for C. */
 	connect: (projectId: string, input: ConnectInput) =>
-		request<TriangleDetail>(`${p(projectId)}/connect`, { method: 'POST', body: input })
+		request<TriangleDetail>(`${p(projectId)}/connect`, { method: 'POST', body: input }),
+
+	// ── Joining semantics, completion and audit (organizer-only) ────────────────
+
+	listConnections: (projectId: string) => request<ConnectionList>(`${p(projectId)}/connections`),
+	createConnection: (projectId: string, input: CreateConnectionInput) =>
+		request<NarrativeConnection>(`${p(projectId)}/connections`, { method: 'POST', body: input }),
+	/** Approve, promote/demote or reject; rejecting never touches the Fact or the texts. */
+	updateConnection: (projectId: string, connectionId: string, input: UpdateConnectionInput) =>
+		request<NarrativeConnection>(`${p(projectId)}/connections/${id(connectionId)}`, {
+			method: 'PATCH',
+			body: input
+		}),
+	getCompletion: (projectId: string, policy: CompletionPolicy) =>
+		request<CompletionReport>(`${p(projectId)}/completion`, { query: { policy } }),
+	/** 409 COMPLETION_BLOCKED with `details.reasons` when the policy cannot be certified. */
+	certify: (projectId: string, policy: CompletionPolicy) =>
+		request<Certification>(`${p(projectId)}/certify`, { method: 'POST', body: { policy } }),
+	listCertifications: (projectId: string) =>
+		request<{ items: Certification[] }>(`${p(projectId)}/certifications`),
+	getAudit: (projectId: string) => request<AuditReport>(`${p(projectId)}/audit`)
 };

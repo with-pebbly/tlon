@@ -48,3 +48,26 @@ M0–M2 resolved every request to `LOCAL_HUMAN`.
 - M4 agent tools are thin wrappers over these endpoints with a per-run token; no tool
   needs its own filtering.
 - Bridges accepted between private anchors are visible to C/human only until disclosed.
+
+## Protected mode (`TLON_OPERATOR_TOKEN`)
+
+Without it, a human participant working on the same machine as the API can open the
+operator pages (or call any route) without a token: a tokenless loopback request _is_
+the operator. Isolation between human participants therefore holds only **across
+machines** (each participant reaches the API through their own network path with only
+their participant token) or **with protected mode**.
+
+Protected mode is opt-in. When the API starts with `TLON_OPERATOR_TOKEN` set:
+
+- a tokenless request, loopback or not, is refused with `401 UNAUTHENTICATED`;
+- `Authorization: Bearer <TLON_OPERATOR_TOKEN>` acts as the operator (compared in
+  constant time); the facilitator keeps that token and never gives it to participants;
+- participant tokens (`tlon_…`) resolve to their own principal as before and never gain
+  operator rights, so operator routes (`/connections`, `/completion`, `/audit`, `/export`
+  …) stay `FORBIDDEN` for them;
+- `GET /api/health` reports `operatorTokenRequired: true` so the web client can ask the
+  facilitator for the token instead of assuming a tokenless operator.
+
+The default (unset) is unchanged: tokenless loopback = operator, as decided above. The
+token is a shared secret between the facilitator's browser/CLI and the server, not a
+login system; it does not authenticate individuals.

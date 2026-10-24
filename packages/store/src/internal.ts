@@ -71,7 +71,10 @@ const READ_ACTIONS: readonly GatewayAction[] = [
 	'disclosure.read',
 	'composite.read',
 	'validation.read',
-	'export'
+	'export',
+	'connection.read',
+	'completion.read',
+	'audit.read'
 ];
 
 /**

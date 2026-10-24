@@ -5,6 +5,11 @@ import {
 	type AgentPrincipal,
 	type Artifact,
 	type ArtifactPage,
+	type AuditReport,
+	type Certification,
+	type CompletionReport,
+	type ConnectionList,
+	type NarrativeConnection,
 	type CompositeRevisionList,
 	type CompositeView,
 	type AuditPage,
@@ -40,6 +45,7 @@ import { eq } from 'drizzle-orm';
 
 import { artifactMethods } from './artifacts.ts';
 import { bundleMethods } from './bundle.ts';
+import { completionMethods } from './completion.ts';
 import { compositeMethods } from './composites.ts';
 import type { Db } from './db.ts';
 import { expansionMethods } from './expansions.ts';
@@ -259,6 +265,31 @@ export interface TlonService {
 		projectId: string,
 		factArtifactId: string
 	): Promise<FactRationale>;
+
+	/** HUMAN write; HUMAN + VALIDATOR read. A/B/C are forbidden (organizer-only). */
+	listConnections(principal: Principal, projectId: string): Promise<ConnectionList>;
+	createConnection(
+		principal: Principal,
+		projectId: string,
+		input: unknown
+	): Promise<NarrativeConnection>;
+	updateConnection(
+		principal: Principal,
+		projectId: string,
+		connectionId: string,
+		input: unknown
+	): Promise<NarrativeConnection>;
+	/** `query` = `{ policy? }`; defaults to the latest run's completion policy, else exploratory. */
+	getCompletion(
+		principal: Principal,
+		projectId: string,
+		query?: unknown
+	): Promise<CompletionReport>;
+	/** 409 COMPLETION_BLOCKED (`details.reasons`) unless the policy is certifiable now. */
+	certify(principal: Principal, projectId: string, input: unknown): Promise<Certification>;
+	listCertifications(principal: Principal, projectId: string): Promise<{ items: Certification[] }>;
+	/** HUMAN only: input manifests and server-side deny checks. */
+	getAudit(principal: Principal, projectId: string): Promise<AuditReport>;
 }
 
 type Method = (principal: Principal, ...args: unknown[]) => Promise<unknown>;
@@ -329,7 +360,8 @@ export function createTlonService(db: Db, options: ServiceOptions = {}): TlonSer
 		...bundleMethods(ctx),
 		...validationMethods(ctx),
 		...gatewayMethods(ctx),
-		...protocolMethods(ctx)
+		...protocolMethods(ctx),
+		...completionMethods(ctx)
 	};
 	const audited: Record<string, unknown> = {};
 	for (const [name, method] of Object.entries(methods) as Array<[string, Method]>) {

@@ -9,3 +9,6 @@ export * from './pyramid.ts';
 export * from './story.ts';
 export * from './composites.ts';
 export * from './continuity.ts';
+export * from './entities.ts';
+export * from './chronology.ts';
+export * from './completion.ts';

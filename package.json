@@ -19,7 +19,8 @@
 		"db:seed": "node --env-file-if-exists=.env apps/cli/src/main.ts seed",
 		"tlon": "node --env-file-if-exists=.env apps/cli/src/main.ts",
 		"agents": "bun packages/agents/src/protocol-run.ts",
-		"agents:legacy": "bun packages/agents/src/run.ts"
+		"agents:legacy": "bun packages/agents/src/run.ts",
+		"analyze": "bun packages/agents/src/analyze.ts"
 	},
 	"devDependencies": {
 		"@types/node": "^24.0.0",

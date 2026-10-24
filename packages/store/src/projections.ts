@@ -28,6 +28,9 @@ import {
 	type IssueList,
 	type ProjectGraph,
 	type TransitionAnnotation,
+	type Direction,
+	type Triangle,
+	type TriangleStatus,
 	type ValidationIssue
 } from '@tlon/contracts';
 import {
@@ -51,6 +54,8 @@ import {
 	issueDismissals,
 	projects,
 	relations,
+	triangleContinuations,
+	triangles,
 	transitionAnnotations,
 	type ArtifactRow,
 	type CandidateRow,
@@ -615,6 +620,67 @@ export function withDismissals(
 	return issues.map((issue) => ({ ...issue, dismissal: dismissals.get(issue.key) ?? null }));
 }
 
+const TRIANGLE_IN_CHUNK = 5000;
+
+/** Triangles of a project with their continuations (no visibility filtering: callers gate on `triangle.read`). */
+export async function loadTriangles(q: Db, projectId: string, where?: SQL): Promise<Triangle[]> {
+	const rows = await q
+		.select()
+		.from(triangles)
+		.where(and(eq(triangles.projectId, projectId), where))
+		.orderBy(asc(triangles.createdAt), asc(triangles.id));
+	if (rows.length === 0) return [];
+	const continuations: Array<typeof triangleContinuations.$inferSelect> = [];
+	for (const part of chunk(
+		rows.map((r) => r.id),
+		TRIANGLE_IN_CHUNK
+	)) {
+		continuations.push(
+			...(await q
+				.select()
+				.from(triangleContinuations)
+				.where(inArray(triangleContinuations.triangleId, part)))
+		);
+	}
+	return rows.map((r) => ({
+		id: r.id,
+		projectId: r.projectId,
+		runId: r.runId,
+		left: {
+			artifactId: r.leftArtifactId,
+			revisionId: r.leftRevisionId,
+			factAnchorId: r.leftFactAnchorId
+		},
+		right: {
+			artifactId: r.rightArtifactId,
+			revisionId: r.rightRevisionId,
+			factAnchorId: r.rightFactAnchorId
+		},
+		fact:
+			r.factArtifactId !== null && r.factRevisionId !== null
+				? { artifactId: r.factArtifactId, revisionId: r.factRevisionId }
+				: null,
+		status: r.status as TriangleStatus,
+		stageIndex: r.stageIndex,
+		depth: r.depth,
+		parentTriangleId: r.parentTriangleId,
+		advance: { left: r.leftDirection as Direction, right: r.rightDirection as Direction },
+		continuations: continuations
+			.filter((c) => c.triangleId === r.id)
+			.map((c) => ({
+				side: c.side as Triangle['continuations'][number]['side'],
+				block: { artifactId: c.artifactId, revisionId: c.revisionId },
+				taskId: c.taskId
+			}))
+			.sort(
+				(a, b) =>
+					a.side.localeCompare(b.side) || a.block.artifactId.localeCompare(b.block.artifactId)
+			),
+		createdAt: r.createdAt.toISOString(),
+		updatedAt: r.updatedAt.toISOString()
+	}));
+}
+
 /**
  * The project as the principal sees it, shaped for continuity validation. Expansions whose
  * anchors are hidden are dropped so replays and explanations never mention hidden titles.
@@ -625,7 +691,9 @@ export async function loadValidationGraph(
 	principal: Principal,
 	projectId: string
 ): Promise<
-	Pick<ProjectGraph, 'project' | 'artifacts' | 'relations' | 'expansions' | 'composites'>
+	Pick<ProjectGraph, 'project' | 'artifacts' | 'relations' | 'expansions' | 'composites'> & {
+		triangles: Triangle[];
+	}
 > {
 	const [[project], artifactList, relationList, expansionList] = await Promise.all([
 		q.select().from(projects).where(eq(projects.id, projectId)),
@@ -643,7 +711,9 @@ export async function loadValidationGraph(
 			(e) => visible.has(e.leftArtifactId) && visible.has(e.rightArtifactId)
 		),
 		// Bridges anchored on composites resolve to their boundary in story order.
-		composites: await loadCompositeSummaries(q, projectId, artifactList, relationList)
+		composites: await loadCompositeSummaries(q, projectId, artifactList, relationList),
+		// Only roles that may read triangles get them; validation readers all can.
+		triangles: isActionAllowed(principal, 'triangle.read') ? await loadTriangles(q, projectId) : []
 	};
 }
 

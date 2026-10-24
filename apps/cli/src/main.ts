@@ -17,7 +17,7 @@ import {
 	type Db,
 	type TlonService
 } from '@tlon/store';
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 
 const principal = LOCAL_HUMAN;
 
@@ -169,25 +169,91 @@ program
 	.argument('<projectId>')
 	.option('-o, --out <file>', 'write to a file instead of stdout')
 	.option('--annotations', 'mark authored beats vs bridges, with mechanism and assumptions')
+	.addOption(
+		new Option('--order <order>', 'which order to show the beats in')
+			.choices(['presentation', 'chronological'])
+			.default('presentation')
+	)
+	.option('--organizer', 'append connections, the completion report and the isolation audit')
 	.description('render the scenario as a linear Markdown manuscript')
 	.action(
-		action(async (projectId: string, options: { out?: string; annotations?: boolean }) => {
-			const [graph, protocol] = await withService((service) =>
-				Promise.all([
-					service.getGraph(principal, projectId),
-					service.getProtocol(principal, projectId)
-				])
-			);
-			const markdown = renderStoryMarkdown(
-				{ ...graph, triangles: protocol.triangles },
-				{ annotations: options.annotations === true }
-			);
-			if (options.out) {
-				await writeFile(options.out, markdown);
-				process.stderr.write(`wrote ${options.out}\n`);
-			} else {
-				process.stdout.write(markdown);
+		action(
+			async (
+				projectId: string,
+				options: {
+					out?: string;
+					annotations?: boolean;
+					order: 'presentation' | 'chronological';
+					organizer?: boolean;
+				}
+			) => {
+				const data = await withService(async (service) => {
+					const [graph, protocol] = await Promise.all([
+						service.getGraph(principal, projectId),
+						service.getProtocol(principal, projectId)
+					]);
+					if (options.organizer !== true) return { graph, protocol };
+					const [connections, completion, audit] = await Promise.all([
+						service.listConnections(principal, projectId),
+						service.getCompletion(principal, projectId),
+						service.getAudit(principal, projectId)
+					]);
+					return { graph, protocol, connections: connections.items, completion, audit };
+				});
+				const markdown = renderStoryMarkdown(
+					{ ...data.graph, triangles: data.protocol.triangles },
+					{
+						annotations: options.annotations === true,
+						order: options.order,
+						transitions: new Map(data.graph.transitions.map((t) => [t.artifactId, t.transition])),
+						...('completion' in data
+							? {
+									connections: data.connections,
+									completion: data.completion,
+									audit: data.audit
+								}
+							: {})
+					}
+				);
+				if (options.out) {
+					await writeFile(options.out, markdown);
+					process.stderr.write(`wrote ${options.out}\n`);
+				} else {
+					process.stdout.write(markdown);
+				}
 			}
+		)
+	);
+
+program
+	.command('completion')
+	.argument('<projectId>')
+	.addOption(
+		new Option('--policy <policy>', 'completion policy (default: the latest run policy)').choices([
+			'exploratory',
+			'coherent_open_mystery',
+			'causally_connected',
+			'resolved'
+		])
+	)
+	.description('print the organizer-only completion report as JSON')
+	.action(
+		action(async (projectId: string, options: { policy?: string }) => {
+			const report = await withService((service) =>
+				service.getCompletion(principal, projectId, { policy: options.policy })
+			);
+			out(JSON.stringify(report, null, 2));
+		})
+	);
+
+program
+	.command('audit')
+	.argument('<projectId>')
+	.description('print the isolation audit (input manifests and deny checks) as JSON')
+	.action(
+		action(async (projectId: string) => {
+			const report = await withService((service) => service.getAudit(principal, projectId));
+			out(JSON.stringify(report, null, 2));
 		})
 	);
 

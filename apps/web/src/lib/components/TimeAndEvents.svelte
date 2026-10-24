@@ -10,7 +10,7 @@
 		transition,
 		highlightEvents = NONE
 	}: {
-		transition: Pick<Transition, 'time' | 'events' | 'repeatableEvents'>;
+		transition: Pick<Transition, 'time' | 'events' | 'repeatableEvents' | 'entities' | 'functions'>;
 		/** Event ids of the issues under review (their `event:<id>` state keys). */
 		highlightEvents?: ReadonlySet<string>;
 	} = $props();
@@ -65,4 +65,28 @@
 			<span class="text-[11px] text-zinc-400">none</span>
 		{/each}
 	</div>
+	{#if transition.entities.length > 0}
+		<div class="flex flex-wrap items-baseline gap-1">
+			<span class="text-[11px] text-zinc-500">Entities</span>
+			{#each transition.entities as entity, i (`${i}:${entity.id}`)}
+				<span
+					class="chip border-zinc-300 bg-white text-zinc-800"
+					title="{entity.kind} · id {entity.id} — identity is the id, not the name"
+					>{entity.name}{#if entity.distinguishing}<span class="ml-1 text-zinc-500"
+							>({entity.distinguishing})</span
+						>{/if}<span class="ml-1 font-mono text-[10px] text-zinc-400">{entity.id}</span></span
+				>
+			{/each}
+		</div>
+	{/if}
+	{#if transition.functions.length > 0}
+		<div class="flex flex-wrap items-baseline gap-1">
+			<span class="text-[11px] text-zinc-500">Function</span>
+			{#each transition.functions as fn (fn)}
+				<span class="chip border-accent-200 bg-accent-50 text-accent-700"
+					>{fn.replaceAll('_', ' ')}</span
+				>
+			{/each}
+		</div>
+	{/if}
 </div>

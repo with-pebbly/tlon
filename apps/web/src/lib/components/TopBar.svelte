@@ -17,6 +17,8 @@
 	let search = $state('');
 	let searchOpen = $state(false);
 	let exporting = $state(false);
+	/** Story export order: reading (presentation) order or story-time chronology. */
+	let storyOrder = $state<'presentation' | 'chronological'>('presentation');
 
 	const results = $derived.by(() => {
 		const q = search.trim().toLowerCase();
@@ -64,13 +66,33 @@
 		}
 	}
 
+	/**
+	 * Manuscript in the chosen order. This is the facilitator's workspace, so the
+	 * organizer-only appendix (connections, completion, isolation audit) is included when
+	 * the server provides it; a missing piece is left out rather than guessed.
+	 */
 	async function exportStory() {
 		exporting = true;
 		try {
-			const graph = await api.getGraph(ws.projectId);
+			const [graph, connections, completion, audit] = await Promise.all([
+				api.getGraph(ws.projectId),
+				api.listConnections(ws.projectId).catch(() => null),
+				api.getCompletion(ws.projectId, ws.completionPolicy).catch(() => null),
+				api.getAudit(ws.projectId).catch(() => null)
+			]);
 			download(
-				`${slug(graph.project.name)}.md`,
-				renderStoryMarkdown({ ...graph, triangles: ws.triangles }, { annotations: true }),
+				`${slug(graph.project.name)}${storyOrder === 'chronological' ? '-chronology' : ''}.md`,
+				renderStoryMarkdown(
+					{ ...graph, triangles: ws.triangles },
+					{
+						annotations: true,
+						order: storyOrder,
+						transitions: new Map(graph.transitions.map((t) => [t.artifactId, t.transition])),
+						...(connections ? { connections: connections.items } : {}),
+						...(completion ? { completion } : {}),
+						...(audit ? { audit } : {})
+					}
+				),
 				'text/markdown'
 			);
 		} catch (error) {
@@ -221,12 +243,24 @@
 			>
 		{/if}
 	</button>
-	<button
-		class="btn"
-		onclick={exportStory}
-		disabled={exporting}
-		title="Linear manuscript in story order (Markdown)">Story</button
-	>
+	<div class="flex items-center">
+		<button
+			class="btn rounded-r-none"
+			onclick={exportStory}
+			disabled={exporting}
+			title={storyOrder === 'chronological'
+				? 'Manuscript ordered by story time; undated beats listed apart (Markdown)'
+				: 'Manuscript in reading order — not a time axis (Markdown)'}>Story</button
+		>
+		<select
+			class="input h-7 w-auto rounded-l-none border-l-0 py-0 text-xs"
+			aria-label="Story export order"
+			bind:value={storyOrder}
+		>
+			<option value="presentation">Reading order</option>
+			<option value="chronological">Chronology</option>
+		</select>
+	</div>
 	<button
 		class="btn"
 		onclick={exportIssues}

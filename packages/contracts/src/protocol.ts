@@ -208,7 +208,11 @@ export const RunConfig = z.object({
 	maxDepth: z.int().min(1).max(16).default(3),
 	maxCandidates: z.int().min(1).max(5).default(3),
 	/** Automatically open the next task when its inputs are ready (§3.3). */
-	autoSchedule: z.boolean().default(true)
+	autoSchedule: z.boolean().default(true),
+	/** Level of joining the run aims for (review ISSUE-08); certification is a separate act. */
+	completionPolicy: z
+		.enum(['exploratory', 'coherent_open_mystery', 'causally_connected', 'resolved'])
+		.default('exploratory')
 });
 export type RunConfig = z.infer<typeof RunConfig>;
 
@@ -417,3 +421,157 @@ export const FactRationale = z.object({
 	createdAt: IsoDate
 });
 export type FactRationale = z.infer<typeof FactRationale>;
+
+// ── Joining semantics, completion and audit (BLOCK_FACT_V2 generation review) ──
+
+/**
+ * How two Blocks are related beyond sharing a Fact (review §4.1). A Triangle's Fact is
+ * always a `fact_link` (derived from triangles, never stored here) and MUST NOT be read
+ * as causality. `causal_canon` is set only by a human (facilitator); AI review may
+ * propose echoes, hypotheses and open questions.
+ */
+export const CONNECTION_KINDS = [
+	'thematic_echo',
+	'causal_hypothesis',
+	'causal_canon',
+	'open_mystery'
+] as const;
+export const ConnectionKind = z.enum(CONNECTION_KINDS);
+export type ConnectionKind = z.infer<typeof ConnectionKind>;
+
+export const NarrativeConnection = z.object({
+	id: Uuid,
+	projectId: Uuid,
+	kind: ConnectionKind,
+	/** The two Blocks the connection is about (any sides, may be composites). */
+	endpointIds: z.tuple([Uuid, Uuid]),
+	/** Fact the connection elaborates, if any. */
+	factArtifactId: Uuid.nullable(),
+	/** Blocks whose text realizes the connection (may be descendants of the endpoints). */
+	realizedByIds: z.array(Uuid),
+	/** The question (open_mystery) or the proposed/approved explanation (others). */
+	statement: z.string(),
+	confidence: z.enum(['explicit', 'inferred', 'unknown']),
+	status: z.enum(['active', 'rejected']),
+	source: z.enum(['human', 'ai_review']),
+	/** Facilitator who approved it (required for causal_canon; marks an open mystery intentional). */
+	approvedBy: z.string().nullable(),
+	createdAt: IsoDate,
+	updatedAt: IsoDate
+});
+export type NarrativeConnection = z.infer<typeof NarrativeConnection>;
+
+export const CreateConnectionInput = z.object({
+	kind: ConnectionKind,
+	endpointIds: z.tuple([Uuid, Uuid]),
+	factArtifactId: Uuid.optional(),
+	realizedByIds: z.array(Uuid).max(40).default([]),
+	statement: z.string().trim().min(1).max(2000),
+	confidence: z.enum(['explicit', 'inferred', 'unknown']).default('unknown'),
+	source: z.enum(['human', 'ai_review']).default('human'),
+	/** Approve on creation (human source only). */
+	approve: z.boolean().default(false)
+});
+export type CreateConnectionInput = z.input<typeof CreateConnectionInput>;
+
+/** Promote/demote, approve, or reject (BF-15: rejecting removes only the interpretation). */
+export const UpdateConnectionInput = z.object({
+	kind: ConnectionKind.optional(),
+	statement: z.string().trim().min(1).max(2000).optional(),
+	status: z.enum(['active', 'rejected']).optional(),
+	approve: z.boolean().optional()
+});
+export type UpdateConnectionInput = z.input<typeof UpdateConnectionInput>;
+
+export const ConnectionList = z.object({ items: z.array(NarrativeConnection) });
+export type ConnectionList = z.infer<typeof ConnectionList>;
+
+export const CompletionPolicy = RunConfig.shape.completionPolicy.unwrap();
+export type CompletionPolicy = z.infer<typeof CompletionPolicy>;
+
+/**
+ * Non-spoiler, organizer-only completion report (review §4.5). `unknown` is kept
+ * whenever the system lacks evidence; it is never rounded to 0 or "yes".
+ */
+export const CompletionReport = z.object({
+	policy: CompletionPolicy,
+	connectedFactPairs: z.int(),
+	/** Approved causal_canon connections whose endpoints lie on different sides. */
+	confirmedCrossBranchCausalPaths: z.union([z.int(), z.literal('unknown')]),
+	openQuestions: z.array(
+		z.object({
+			connectionId: Uuid.nullable(),
+			kind: z.enum(['open_mystery', 'causal_hypothesis', 'unexplained_fact_link']),
+			statement: z.string(),
+			endpointIds: z.array(Uuid),
+			/** Approved by a human as intentional ambiguity. */
+			intentional: z.boolean()
+		})
+	),
+	/** Open blocker/warning chronology issues (temporal_order, direction_mismatch). */
+	chronologyConflicts: z.int(),
+	blockers: z.int(),
+	isolationVerified: z.union([z.boolean(), z.literal('unknown')]),
+	/** Advisory motif-reuse signals (review ISSUE-09); never block certification. */
+	motifSignals: z.array(z.object({ artifactId: Uuid, signal: z.string() })),
+	/** Whether `policy` can be certified now, and why not. */
+	certifiable: z.boolean(),
+	reasons: z.array(z.string())
+});
+export type CompletionReport = z.infer<typeof CompletionReport>;
+
+export const CertifyInput = z.object({ policy: CompletionPolicy });
+export type CertifyInput = z.input<typeof CertifyInput>;
+
+export const Certification = z.object({
+	id: Uuid,
+	projectId: Uuid,
+	policy: CompletionPolicy,
+	actorId: z.string(),
+	report: CompletionReport,
+	createdAt: IsoDate
+});
+export type Certification = z.infer<typeof Certification>;
+
+/**
+ * Privacy-safe, ID-level record of what one task executor was served (review P0 /
+ * BF-12). Written by the server when it assembles a task view; never contains text.
+ */
+export const InputManifest = z.object({
+	servedAt: IsoDate,
+	inputs: z.array(z.object({ artifactId: Uuid, revisionId: Uuid, ownerScope: OwnerScope })),
+	disclosureGrantIds: z.array(Uuid)
+});
+export type InputManifest = z.infer<typeof InputManifest>;
+
+export const AuditReport = z.object({
+	projectId: Uuid,
+	tasks: z.array(
+		z.object({
+			taskId: Uuid,
+			type: TaskType,
+			role: AgentRole,
+			executorKind: ExecutorKind.nullable(),
+			stageIndex: z.int(),
+			state: TaskState,
+			manifest: InputManifest.nullable(),
+			/** Inputs owned by the opposite private side (must be empty for A/B tasks). */
+			crossScopeInputIds: z.array(Uuid)
+		})
+	),
+	/**
+	 * Server-side deny checks: for every A/B participant, the visibility predicate is
+	 * evaluated against every Block of the opposite side.
+	 */
+	denyChecks: z.array(
+		z.object({
+			principalId: Uuid,
+			role: AgentRole,
+			checkedArtifacts: z.int(),
+			visibleArtifactIds: z.array(Uuid)
+		})
+	),
+	/** true iff every served A/B manifest and every deny check is clean; unknown if nothing was served. */
+	isolationVerified: z.union([z.boolean(), z.literal('unknown')])
+});
+export type AuditReport = z.infer<typeof AuditReport>;

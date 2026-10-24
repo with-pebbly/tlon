@@ -1,4 +1,6 @@
 import type {
+	CompletionPolicy,
+	ConnectionKind,
 	Direction,
 	FactKind,
 	Role,
@@ -118,3 +120,42 @@ export function inboxOrder(tasks: readonly Task[]): Task[] {
 			open(a) - open(b) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)
 	);
 }
+
+/** How two Blocks are joined beyond sharing a Fact (a Fact link is never a cause). */
+export const CONNECTION_KIND_LABEL: Record<ConnectionKind, string> = {
+	thematic_echo: 'Thematic echo',
+	causal_hypothesis: 'Causal hypothesis',
+	causal_canon: 'Causal canon',
+	open_mystery: 'Open mystery'
+};
+
+export const CONNECTION_KIND_HINT: Record<ConnectionKind, string> = {
+	thematic_echo: 'motif similarity — no causality asserted',
+	causal_hypothesis: 'a proposed explanation, not canon',
+	causal_canon: 'an approved causal relation (facilitator only)',
+	open_mystery: 'a question deliberately left open'
+};
+
+export const CONNECTION_KIND_CLASS: Record<ConnectionKind, string> = {
+	thematic_echo: 'border-zinc-300 bg-white text-zinc-700',
+	causal_hypothesis: 'border-dashed border-sky-400 bg-sky-50 text-sky-800',
+	causal_canon: 'border-emerald-400 bg-emerald-50 text-emerald-800',
+	open_mystery: 'border-violet-300 bg-violet-50 text-violet-800'
+};
+
+export const COMPLETION_POLICY_LABEL: Record<CompletionPolicy, string> = {
+	exploratory: 'Exploratory',
+	coherent_open_mystery: 'Coherent open mystery',
+	causally_connected: 'Causally connected',
+	resolved: 'Resolved'
+};
+
+/** What each policy requires before it can be certified (mirrors `completionReport`). */
+export const COMPLETION_POLICY_HINT: Record<CompletionPolicy, string> = {
+	exploratory: 'Always certifiable — a draft; Facts may stay unexplained.',
+	coherent_open_mystery:
+		'No open blockers, and every open question is approved by a facilitator as intentional.',
+	causally_connected:
+		'No open blockers, and at least one approved causal canon connection joins A and B.',
+	resolved: 'Causally connected, and no open questions left.'
+};

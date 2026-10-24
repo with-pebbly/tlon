@@ -10,6 +10,7 @@ import {
 	saveOpenComposites
 } from '$lib/graph/composites';
 import { loadLayoutChoice, saveLayoutChoice, type GraphLayout } from '$lib/graph/positions';
+import { SCOPE_SHORT } from '$lib/ui';
 import {
 	LOCAL_HUMAN,
 	OPEN_EXPANSION_STATUSES,
@@ -51,7 +52,11 @@ import {
 	type StartRunInput,
 	type Triangle,
 	type TriangleDetail,
-	type TriangleStatus
+	type TriangleStatus,
+	type CompletionPolicy,
+	type CreateConnectionInput,
+	type NarrativeConnection,
+	type UpdateConnectionInput
 } from '@tlon/contracts';
 import {
 	buildFractalTree,
@@ -202,6 +207,14 @@ export class Workspace {
 	protocolError = $state.raw<ApiError | null>(null);
 	/** Candidates and tasks per triangle (`GET /triangles/:id`), refreshed with the protocol. */
 	triangleDetails = $state.raw(new Map<string, TriangleDetail>());
+	/**
+	 * Narrative connections (organizer-only, protocol page). Loaded on demand by
+	 * `reloadConnections`; `connectionsRevision` bumps after every change so the
+	 * completion report re-fetches.
+	 */
+	connections = $state.raw<NarrativeConnection[]>([]);
+	connectionsError = $state.raw<ApiError | null>(null);
+	connectionsRevision = $state(0);
 
 	/** Idempotency keys for accept requests not yet confirmed by the server. */
 	#acceptKeys = new Map<string, string>();
@@ -399,6 +412,10 @@ export class Workspace {
 	triangles = $derived<Triangle[]>(this.protocol?.triangles ?? []);
 	tasks = $derived(this.protocol?.tasks ?? []);
 	trianglesById = $derived(new Map(this.triangles.map((t) => [t.id, t])));
+	/** Completion policy the current run aims for; runs started before it existed are exploratory. */
+	completionPolicy = $derived<CompletionPolicy>(
+		this.runs[0]?.config.completionPolicy ?? 'exploratory'
+	);
 
 	/**
 	 * Generation stage per artifact: the stage of the task that produced it (seed = 1),
@@ -736,6 +753,14 @@ export class Workspace {
 		return this.artifactsById.get(artifactId)?.title ?? artifactId.slice(0, 8);
 	}
 
+	/** "Title (A)": a Block with the side that owns it (organizer views only). */
+	blockLabel(artifactId: string): string {
+		const artifact = this.artifactsById.get(artifactId);
+		return artifact
+			? `${artifact.title} (${SCOPE_SHORT[artifact.ownerScope]})`
+			: artifactId.slice(0, 8);
+	}
+
 	/** "A · scout" for agent principals; the raw id (shortened) for anything else. */
 	principalLabel(principalId: string): string {
 		const agent = this.agentsById.get(principalId);
@@ -1068,9 +1093,32 @@ export class Workspace {
 		return this.#mutate(() => api.setTriangleStatus(this.projectId, triangleId, status));
 	}
 
-	/** Opens a gap between two anchors (a child gap when `parentTriangleId` is set). */
+	/**
+	 * Opens a gap between two anchors (a child gap when `parentTriangleId` is set). Two
+	 * anchors of the same private side are refused (SAME_SIDE_GAP); the error is reworded
+	 * so the facilitator sees why.
+	 */
 	async connect(input: ConnectInput): Promise<TriangleDetail> {
-		const detail = await this.#mutate(() => api.connect(this.projectId, input));
+		let detail: TriangleDetail;
+		try {
+			detail = await this.#mutate(() => api.connect(this.projectId, input));
+		} catch (error) {
+			if (!isApiError(error) || error.code !== 'SAME_SIDE_GAP') throw error;
+			const { details } = error;
+			const side =
+				typeof details === 'object' &&
+				details !== null &&
+				'side' in details &&
+				(details.side === 'A' || details.side === 'B')
+					? details.side
+					: 'the same side';
+			throw new ApiError(
+				error.code,
+				error.status,
+				`Both Blocks belong to ${side} — a gap joins A's material with B's. Pick one Block from each side.`,
+				details
+			);
+		}
 		this.multi.clear();
 		return detail;
 	}
@@ -1080,6 +1128,44 @@ export class Workspace {
 		input: { title: string; summary?: string }
 	): Promise<CompositeView> {
 		return this.#mutate(() => api.composeTriangle(this.projectId, triangleId, input));
+	}
+
+	// ── Narrative connections (organizer-only) ──────────────────────────────────
+
+	async reloadConnections() {
+		try {
+			this.connections = (await api.listConnections(this.projectId)).items;
+			this.connectionsError = null;
+		} catch (error) {
+			this.connectionsError = isApiError(error)
+				? error
+				: new ApiError('BAD_RESPONSE', 0, String(error));
+		}
+	}
+
+	/** Runs a connection change, then re-fetches the list and bumps `connectionsRevision`. */
+	async #mutateConnections<T>(action: () => Promise<T>): Promise<T> {
+		this.pending++;
+		try {
+			const result = await action();
+			await this.reloadConnections();
+			this.connectionsRevision++;
+			return result;
+		} finally {
+			this.pending--;
+		}
+	}
+
+	createConnection(input: CreateConnectionInput): Promise<NarrativeConnection> {
+		return this.#mutateConnections(() => api.createConnection(this.projectId, input));
+	}
+
+	/** Rejecting removes only the interpretation; the Fact and the texts stay. */
+	updateConnection(
+		connectionId: string,
+		input: UpdateConnectionInput
+	): Promise<NarrativeConnection> {
+		return this.#mutateConnections(() => api.updateConnection(this.projectId, connectionId, input));
 	}
 
 	// ── UI-only actions ─────────────────────────────────────────────────────────

@@ -22,7 +22,16 @@ import {
 	Relation,
 	Uuid
 } from './models.ts';
-import { FactCandidate, FactAnchor, FactRationale, Run, Task, Triangle } from './protocol.ts';
+import {
+	Certification,
+	FactCandidate,
+	FactAnchor,
+	FactRationale,
+	NarrativeConnection,
+	Run,
+	Task,
+	Triangle
+} from './protocol.ts';
 import { BridgeStructured, StructuredRecord } from './structured.ts';
 import { Transition, TransitionAnnotation, ValidationIssue } from './validation.ts';
 
@@ -264,7 +273,10 @@ export const ExportBundle = z.object({
 	tasks: z.array(Task).optional(),
 	factCandidates: z.array(FactCandidate).optional(),
 	factRationales: z.array(FactRationale).optional(),
-	factAnchors: z.array(FactAnchor).optional()
+	factAnchors: z.array(FactAnchor).optional(),
+	/** Organizer-only joining state (additive; absent in older bundles). */
+	connections: z.array(NarrativeConnection).optional(),
+	certifications: z.array(Certification).optional()
 });
 export type ExportBundle = z.infer<typeof ExportBundle>;
 

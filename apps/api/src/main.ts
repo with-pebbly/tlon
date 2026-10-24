@@ -11,7 +11,9 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 
 const handle = await openDatabase();
 await migrateDatabase(handle);
-const app = buildApp({ service: createTlonService(handle.db), logger: true });
+// Optional protected mode (ADR 0007): without a token the loopback peer is the operator.
+const operatorToken = process.env.TLON_OPERATOR_TOKEN?.trim() || undefined;
+const app = buildApp({ service: createTlonService(handle.db), logger: true, operatorToken });
 
 let closing = false;
 async function shutdown(signal: string) {

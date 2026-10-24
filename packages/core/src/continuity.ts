@@ -1,17 +1,24 @@
 import type {
 	Assertion,
+	BeatTime,
 	IssueKind,
 	ProjectGraph,
 	Provenance,
 	Transition,
+	Triangle,
 	ValidationIssue
 } from '@tlon/contracts';
 
-import { storyBeats } from './story.ts';
+import { compareBeatTime } from './chronology.ts';
+import { entityRegistry } from './entities.ts';
+import { activeTriangles, type StoryBeat, storyBeats } from './story.ts';
 import { detectTensions } from './tensions.ts';
 
 type GraphLike = Pick<ProjectGraph, 'project' | 'artifacts' | 'relations' | 'expansions'> &
-	Partial<Pick<ProjectGraph, 'composites'>>;
+	Partial<Pick<ProjectGraph, 'composites'>> & { triangles?: readonly Triangle[] };
+
+/** Private side of an artifact's owner scope; everything else replays as one shared chain. */
+const SIDE_OF_SCOPE: Record<string, 'A' | 'B'> = { A_PRIVATE: 'A', B_PRIVATE: 'B' };
 
 export type AnnotationLike = { artifactRevisionId: string; transition: Transition };
 
@@ -111,9 +118,27 @@ export function validateContinuity(
 		}
 	};
 	const title = (id: string) => `“${artifacts.get(id)?.title ?? id}”`;
+	/**
+	 * Block–Fact continuations can lie years apart, so neighbours on a side chain are not
+	 * contiguous moments: a state change between them is a missing transition unless both
+	 * state the same story day (and year), and chronology is judged per triangle
+	 * (`direction_mismatch`), not by the reading order.
+	 */
+	const blockFact = activeTriangles(graph.triangles).length > 0;
+	const sameMoment = (aId: string, bId: string) => {
+		const a = transitionOf(aId)?.time;
+		const b = transitionOf(bId)?.time;
+		return (
+			a?.day !== undefined &&
+			a.day === b?.day &&
+			a.year === b.year &&
+			!a.outOfOrder &&
+			!b.outOfOrder
+		);
+	};
 
-	/** Path position of every beat (annotated or not): adjacency and gaps are judged on it. */
-	const position = new Map(beats.map((b, i) => [b.artifact.id, i]));
+	/** Path position within the chain being replayed: adjacency and gaps are judged on it. */
+	let position = new Map<string, number>();
 	const gapBetween = (earlierId: string, laterId: string) =>
 		(position.get(laterId) ?? 0) - (position.get(earlierId) ?? 0) - 1;
 
@@ -150,7 +175,7 @@ export function validateContinuity(
 			return;
 		}
 		const gap = gapBetween(earlierId, laterId);
-		if (!hard && gap > 0) {
+		if (!hard && (gap > 0 || (blockFact && !sameMoment(earlierId, laterId)))) {
 			// Beats in between could have changed it without saying so: a missing transition,
 			// not proof of contradiction (GENERATION_REVIEW V2-05).
 			push(
@@ -158,7 +183,9 @@ export function validateContinuity(
 				'warning',
 				[earlierId, laterId],
 				key,
-				`${title(laterId)} needs ${key} different from what ${title(earlierId)} left, and none of the ${gap} beat(s) between narrates the change: ${detail}.`,
+				gap > 0
+					? `${title(laterId)} needs ${key} different from what ${title(earlierId)} left, and none of the ${gap} beat(s) between narrates the change: ${detail}.`
+					: `${title(laterId)} needs ${key} different from what ${title(earlierId)} left; the two Blocks are not stated to be the same moment, so the change may have happened off-page: ${detail}.`,
 				'revise_bridge'
 			);
 			return;
@@ -173,249 +200,387 @@ export function validateContinuity(
 		);
 	};
 
-	// ── story time ───────────────────────────────────────────────────────────
-	/** Minutes since the story's day 0; days missing on a beat are inherited from the last stated day. */
-	let lastTime: { abs: number; tolerance: number; artifactId: string; dayStated: boolean } | null =
-		null;
-	let lastDay: number | null = null;
-	const absTime = (artifactId: string, t: Transition) => {
-		const time = t.time;
-		if (!time || time.outOfOrder || time.minute === undefined) {
-			if (time?.day !== undefined && !time.outOfOrder) lastDay = time.day;
-			return null;
-		}
-		const dayStated = time.day !== undefined;
-		const day = time.day ?? lastDay ?? 0;
-		lastDay = day;
-		return {
-			abs: day * 1440 + time.minute,
-			tolerance: time.approx ? time.toleranceMinutes : 0,
-			artifactId,
-			dayStated
+	const unannotated: string[] = [];
+	const paths: string[][] = [];
+
+	/**
+	 * Replays one reading chain. Legacy projects have a single chain (the whole story);
+	 * Block–Fact projects replay A's and B's chains separately (independent worlds joined
+	 * only by Facts), so cross-side state differences never raise issues.
+	 */
+	const replayChain = (chain: readonly StoryBeat[]) => {
+		position = new Map(chain.map((b, i) => [b.artifact.id, i]));
+		// ── story time ───────────────────────────────────────────────────────────
+		/** Minutes since the story's day 0; days missing on a beat are inherited from the last stated day. */
+		let lastTime: {
+			abs: number;
+			tolerance: number;
+			artifactId: string;
+			dayStated: boolean;
+			year: number | undefined;
+		} | null = null;
+		let lastDay: number | null = null;
+		let lastYear: { year: number; tolerance: number; artifactId: string } | null = null;
+		const absTime = (artifactId: string, t: Transition) => {
+			const time = t.time;
+			if (!time || time.outOfOrder || time.minute === undefined) {
+				if (time?.day !== undefined && !time.outOfOrder) lastDay = time.day;
+				return null;
+			}
+			const dayStated = time.day !== undefined;
+			const day = time.day ?? lastDay ?? 0;
+			lastDay = day;
+			return {
+				abs: day * 1440 + time.minute,
+				tolerance: time.approx ? time.toleranceMinutes : 0,
+				artifactId,
+				dayStated,
+				year: time.year
+			};
 		};
-	};
-	const checkTime = (artifactId: string, t: Transition) => {
-		const now = absTime(artifactId, t);
-		if (!now) return null;
-		if (lastTime && now.abs + now.tolerance + lastTime.tolerance < lastTime.abs) {
-			const back = lastTime.abs - now.abs;
-			// Both days stated (or a step back under 12 h): the beat is out of order.
-			// Otherwise it may silently cross midnight, so ask for the day instead.
-			const certain = (now.dayStated && lastTime.dayStated) || back < 12 * 60;
-			push(
-				'temporal_order',
-				certain ? 'blocker' : 'warning',
-				[lastTime.artifactId, artifactId],
-				null,
-				certain
-					? `${title(artifactId)} happens ${back} min before ${title(lastTime.artifactId)} but follows it in the story (mark it as a flashback or move the event).`
-					: `${title(artifactId)} reads as earlier than ${title(lastTime.artifactId)}; if it is the next day, state the day.`,
-				'revise_bridge'
-			);
-		}
-		const bridge = bridgeOf.get(artifactId);
-		if (
-			lastTime &&
-			bridge &&
-			bridge.leftArtifactId === lastTime.artifactId &&
-			now.abs - lastTime.abs > 6 * 60
-		) {
-			push(
-				'temporal_order',
-				'warning',
-				[lastTime.artifactId, artifactId],
-				null,
-				`${title(artifactId)} starts ${Math.round((now.abs - lastTime.abs) / 60)} h after its left anchor without narrating the interval.`,
-				'revise_bridge'
-			);
-		}
-		if (lastTime) {
-			const prevBridge = bridgeOf.get(lastTime.artifactId);
+		const checkTime = (artifactId: string, t: Transition) => {
+			const time = t.time;
+			if (blockFact) {
+				// Chronology of Block–Fact chains is checked per triangle (direction_mismatch);
+				// keep a comparable instant only for same-day monotonic checks.
+				return time?.day !== undefined && time.minute !== undefined && !time.outOfOrder
+					? (time.year ?? 0) * 527_040 + time.day * 1440 + time.minute
+					: null;
+			}
+			if (time?.year !== undefined && !time.outOfOrder) {
+				// `approx` widens a year by ±1; `relative`-only beats never reach this point.
+				const tolerance = time.approx ? 1 : 0;
+				if (lastYear && time.year + tolerance + lastYear.tolerance < lastYear.year) {
+					push(
+						'temporal_order',
+						'warning',
+						[lastYear.artifactId, artifactId],
+						null,
+						`${title(artifactId)} is dated ${time.year}, earlier than ${title(lastYear.artifactId)} (${lastYear.year}), which it follows in this chain; if it is a flashback, mark it out of order.`,
+						'mark_intentional'
+					);
+				}
+				lastYear = { year: time.year, tolerance, artifactId };
+			}
+			const now = absTime(artifactId, t);
+			if (!now) return null;
+			// Day/minute only compare within one year: when both state different years the year decides.
+			const comparable =
+				!lastTime ||
+				lastTime.year === undefined ||
+				now.year === undefined ||
+				lastTime.year === now.year;
+			const prev = comparable ? lastTime : null;
+			if (prev && now.abs + now.tolerance + prev.tolerance < prev.abs) {
+				const back = prev.abs - now.abs;
+				// Both days stated (or a step back under 12 h): the beat is out of order.
+				// Otherwise it may silently cross midnight, so ask for the day instead.
+				const certain = (now.dayStated && prev.dayStated) || back < 12 * 60;
+				push(
+					'temporal_order',
+					certain ? 'blocker' : 'warning',
+					[prev.artifactId, artifactId],
+					null,
+					certain
+						? `${title(artifactId)} happens ${back} min before ${title(prev.artifactId)} but follows it in the story (mark it as a flashback or move the event).`
+						: `${title(artifactId)} reads as earlier than ${title(prev.artifactId)}; if it is the next day, state the day.`,
+					'revise_bridge'
+				);
+			}
+			const bridge = bridgeOf.get(artifactId);
 			if (
-				prevBridge &&
-				prevBridge.rightArtifactId === artifactId &&
-				now.abs - lastTime.abs > 6 * 60
+				prev &&
+				bridge &&
+				bridge.leftArtifactId === prev.artifactId &&
+				now.abs - prev.abs > 6 * 60
 			) {
 				push(
 					'temporal_order',
 					'warning',
-					[lastTime.artifactId, artifactId],
-					null,
-					`${title(lastTime.artifactId)} is written as leading straight into ${title(artifactId)}, but ${Math.round((now.abs - lastTime.abs) / 60)} h pass between them; establish the interval (e.g. the night) in the bridge.`,
-					'revise_bridge'
-				);
-			}
-		}
-		lastTime = now;
-		return now.abs;
-	};
-
-	// ── unique events and one-way quantities ────────────────────────────────
-	const eventsDone = new Map<string, string>();
-	type Reading = { value: number; unit: string | undefined; at: number | null; artifactId: string };
-	const readings = new Map<string, Reading>();
-	const checkMonotonic = (a: Assertion, artifactId: string, at: number | null) => {
-		if (typeof a.value !== 'number' || a.epistemic !== 'world') return;
-		const key = stateKey(a);
-		const prev = readings.get(key);
-		const mode = a.monotonic;
-		if (prev && mode && prev.unit === a.unit) {
-			const up = a.value > prev.value;
-			const same = a.value === prev.value;
-			const timePassed = prev.at !== null && at !== null && at > prev.at;
-			const wrong =
-				((mode === 'decreasing' || mode === 'non_increasing') && up) ||
-				((mode === 'increasing' || mode === 'non_decreasing') && a.value < prev.value) ||
-				((mode === 'decreasing' || mode === 'increasing') && same && timePassed);
-			if (wrong) {
-				const unit = a.unit ? ` ${a.unit}` : '';
-				const gap = gapBetween(prev.artifactId, artifactId);
-				const base = same
-					? `${key} stays at ${a.value}${unit} from ${title(prev.artifactId)} to ${title(artifactId)} while ${at! - prev.at!} min pass; a ${mode} quantity cannot freeze unexplained.`
-					: `${key} goes from ${prev.value} to ${a.value}${unit} (${title(prev.artifactId)} → ${title(artifactId)}), but it is ${mode}.`;
-				push(
-					'monotonic_violation',
-					// Across unnarrated beats a refill/reset may have happened off-page: warn.
-					gap > 0 ? 'warning' : 'blocker',
 					[prev.artifactId, artifactId],
-					key,
-					gap > 0 ? `${base} None of the ${gap} beat(s) between explains it.` : base,
+					null,
+					`${title(artifactId)} starts ${Math.round((now.abs - prev.abs) / 60)} h after its left anchor without narrating the interval.`,
 					'revise_bridge'
 				);
 			}
-		}
-		readings.set(key, { value: a.value, unit: a.unit, at, artifactId });
-	};
+			if (prev) {
+				const prevBridge = bridgeOf.get(prev.artifactId);
+				if (
+					prevBridge &&
+					prevBridge.rightArtifactId === artifactId &&
+					now.abs - prev.abs > 6 * 60
+				) {
+					push(
+						'temporal_order',
+						'warning',
+						[prev.artifactId, artifactId],
+						null,
+						`${title(prev.artifactId)} is written as leading straight into ${title(artifactId)}, but ${Math.round((now.abs - prev.abs) / 60)} h pass between them; establish the interval (e.g. the night) in the bridge.`,
+						'revise_bridge'
+					);
+				}
+			}
+			lastTime = now;
+			return comparable ? now.abs : null;
+		};
 
-	const world = new Map<string, Holder>();
-	const irreversibleDone = new Map<string, Holder>();
-	const beliefs = new Map<
-		string,
-		Array<{ value: Assertion['value']; holder: string; artifactId: string }>
-	>();
-	const preparations = new Map<string, string>();
-	const unannotated: string[] = [];
-	const path = beats.map((b) => b.artifact.id);
+		// ── unique events and one-way quantities ────────────────────────────────
+		const eventsDone = new Map<string, string>();
+		type Reading = {
+			value: number;
+			unit: string | undefined;
+			at: number | null;
+			artifactId: string;
+		};
+		const readings = new Map<string, Reading>();
+		const checkMonotonic = (a: Assertion, artifactId: string, at: number | null) => {
+			if (typeof a.value !== 'number' || a.epistemic !== 'world') return;
+			const key = stateKey(a);
+			const prev = readings.get(key);
+			const mode = a.monotonic;
+			if (prev && mode && prev.unit === a.unit) {
+				const up = a.value > prev.value;
+				const same = a.value === prev.value;
+				const timePassed = prev.at !== null && at !== null && at > prev.at;
+				const wrong =
+					((mode === 'decreasing' || mode === 'non_increasing') && up) ||
+					((mode === 'increasing' || mode === 'non_decreasing') && a.value < prev.value) ||
+					((mode === 'decreasing' || mode === 'increasing') && same && timePassed);
+				if (wrong) {
+					const unit = a.unit ? ` ${a.unit}` : '';
+					const gap = gapBetween(prev.artifactId, artifactId);
+					const base = same
+						? `${key} stays at ${a.value}${unit} from ${title(prev.artifactId)} to ${title(artifactId)} while ${at! - prev.at!} min pass; a ${mode} quantity cannot freeze unexplained.`
+						: `${key} goes from ${prev.value} to ${a.value}${unit} (${title(prev.artifactId)} → ${title(artifactId)}), but it is ${mode}.`;
+					push(
+						'monotonic_violation',
+						// Across unnarrated beats a refill/reset may have happened off-page: warn.
+						gap > 0 ? 'warning' : 'blocker',
+						[prev.artifactId, artifactId],
+						key,
+						gap > 0 ? `${base} None of the ${gap} beat(s) between explains it.` : base,
+						'revise_bridge'
+					);
+				}
+			}
+			readings.set(key, { value: a.value, unit: a.unit, at, artifactId });
+		};
 
-	for (const { artifact } of beats) {
-		const t = transitionOf(artifact.id);
-		if (!t) {
-			unannotated.push(artifact.id);
-			continue;
-		}
-		const at = checkTime(artifact.id, t);
-		for (const event of t.events) {
-			const first = eventsDone.get(event);
-			if (first !== undefined) {
-				clash(
-					first,
-					artifact.id,
-					`event:${event}`,
-					`${event} already happened in ${title(first)}`,
-					true
+		const world = new Map<string, Holder>();
+		const irreversibleDone = new Map<string, Holder>();
+		const beliefs = new Map<
+			string,
+			Array<{ value: Assertion['value']; holder: string; artifactId: string }>
+		>();
+		const preparations = new Map<string, string>();
+		const path = chain.map((b) => b.artifact.id);
+		paths.push(path);
+
+		for (const { artifact } of chain) {
+			const t = transitionOf(artifact.id);
+			if (!t) {
+				unannotated.push(artifact.id);
+				continue;
+			}
+			const at = checkTime(artifact.id, t);
+			for (const event of t.events) {
+				const first = eventsDone.get(event);
+				if (first !== undefined) {
+					clash(
+						first,
+						artifact.id,
+						`event:${event}`,
+						`${event} already happened in ${title(first)}`,
+						true
+					);
+				} else {
+					eventsDone.set(event, artifact.id);
+				}
+			}
+			for (const a of [...t.preconditions, ...t.effects]) checkMonotonic(a, artifact.id, at);
+			const ann = annotations.get(artifact.id);
+			if (
+				ann &&
+				candidate?.artifactId !== artifact.id &&
+				ann.artifactRevisionId !== artifact.headRevisionId
+			) {
+				push(
+					'stale_annotation',
+					'warning',
+					[artifact.id],
+					null,
+					`State annotation of ${title(artifact.id)} describes an older revision.`,
+					'keep_as_is'
 				);
-			} else {
-				eventsDone.set(event, artifact.id);
+			}
+			for (const pre of t.preconditions) {
+				const key = stateKey(pre);
+				if (pre.epistemic !== 'world') continue;
+				preparations.delete(key);
+				const cur = world.get(key);
+				if (cur && cur.value !== pre.value) {
+					clash(
+						cur.artifactId,
+						artifact.id,
+						key,
+						`expects ${String(pre.value)}, but ${title(cur.artifactId)} left it ${String(cur.value)}`
+					);
+				}
+			}
+			for (const eff of t.effects) {
+				const key = stateKey(eff);
+				if (eff.epistemic !== 'world') {
+					const list = beliefs.get(key) ?? [];
+					const holder = eff.holder ?? '(unspecified)';
+					for (const other of list) {
+						if (other.value !== eff.value && other.holder !== holder) {
+							push(
+								'perspective_conflict',
+								'info',
+								[other.artifactId, artifact.id],
+								key,
+								`${other.holder} and ${holder} hold different views on ${key}.`,
+								'mark_intentional'
+							);
+						}
+					}
+					list.push({ value: eff.value, holder, artifactId: artifact.id });
+					beliefs.set(key, list);
+					continue;
+				}
+				const done = irreversibleDone.get(key);
+				if (eff.irreversible && done && done.value === eff.value) {
+					clash(
+						done.artifactId,
+						artifact.id,
+						key,
+						`the irreversible change to ${String(eff.value)} already happened in ${title(done.artifactId)}`,
+						true
+					);
+				}
+				if (eff.irreversible)
+					irreversibleDone.set(key, {
+						value: eff.value,
+						artifactId: artifact.id,
+						irreversible: true
+					});
+				if (preparations.has(key) && preparations.get(key) !== artifact.id)
+					preparations.delete(key);
+				if (eff.preparation) preparations.set(key, artifact.id);
+				world.set(key, {
+					value: eff.value,
+					artifactId: artifact.id,
+					irreversible: eff.irreversible
+				});
+			}
+			if (
+				provenance(artifact.id) !== 'canonical_anchor' &&
+				t.effects.length === 0 &&
+				t.assumptions.length === 0
+			) {
+				push(
+					'redundancy',
+					'info',
+					[artifact.id],
+					null,
+					`${title(artifact.id)} changes no state and adds no fact; this interval may already have sufficient detail.`,
+					'stop_expansion'
+				);
 			}
 		}
-		for (const a of [...t.preconditions, ...t.effects]) checkMonotonic(a, artifact.id, at);
-		const ann = annotations.get(artifact.id);
-		if (
-			ann &&
-			candidate?.artifactId !== artifact.id &&
-			ann.artifactRevisionId !== artifact.headRevisionId
-		) {
+		for (const [key, artifactId] of preparations) {
+			if (path.indexOf(artifactId) < path.length - 1) {
+				push(
+					'abandoned_preparation',
+					'warning',
+					[artifactId],
+					key,
+					`${title(artifactId)} prepares ${key}, but no later beat uses or explains it.`,
+					'request_c_resolution'
+				);
+			}
+		}
+	};
+
+	const liveTriangles = activeTriangles(graph.triangles);
+	const chains =
+		liveTriangles.length === 0
+			? [beats]
+			: (['A', 'B', 'other'] as const)
+					.map((side) =>
+						beats.filter((b) => (SIDE_OF_SCOPE[b.artifact.ownerScope] ?? 'other') === side)
+					)
+					.filter((chain) => chain.length > 0);
+	for (const chain of chains) replayChain(chain);
+
+	// ── Block–Fact: a continuation must not contradict the direction it was asked to write in ──
+	const describeTime = (time: BeatTime, component: 'year' | 'day' | 'minute') => {
+		if (component === 'year') return `year ${time.year}`;
+		if (component === 'day') return `day ${time.day}`;
+		const minute = time.minute ?? 0;
+		const clock = `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
+		return time.day === undefined ? clock : `day ${time.day}, ${clock}`;
+	};
+	for (const triangle of liveTriangles) {
+		const advance = triangle.advance ?? { left: 'forward', right: 'backward' };
+		for (const continuation of triangle.continuations) {
+			const direction = advance[continuation.side];
+			if (direction === 'atemporal') continue;
+			const anchorId = triangle[continuation.side].artifactId;
+			const blockId = continuation.block.artifactId;
+			const blockTime = transitionOf(blockId)?.time;
+			const anchorTime = transitionOf(anchorId)?.time;
+			if (!blockTime || !anchorTime || blockTime.outOfOrder || anchorTime.outOfOrder) continue;
+			const compared = compareBeatTime(blockTime, anchorTime);
+			if (!compared || compared.delta === 0) continue;
+			const wrong = direction === 'backward' ? compared.delta > 0 : compared.delta < 0;
+			if (!wrong) continue;
 			push(
-				'stale_annotation',
+				'direction_mismatch',
 				'warning',
-				[artifact.id],
+				[blockId, anchorId],
 				null,
-				`State annotation of ${title(artifact.id)} describes an older revision.`,
+				`${title(blockId)} is written ${direction} from its anchor ${title(anchorId)} but is dated ${direction === 'backward' ? 'later' : 'earlier'} (${describeTime(blockTime, compared.component)} vs ${describeTime(anchorTime, compared.component)}).`,
+				'revise_bridge'
+			);
+		}
+	}
+
+	// ── identity: same-looking names are flagged, never merged ──
+	const registry = entityRegistry(
+		beats.flatMap((b) => {
+			const transition = transitionOf(b.artifact.id);
+			return transition ? [{ artifactId: b.artifact.id, transition }] : [];
+		})
+	);
+	const names = registry.map((entity) => {
+		const full = entity.name.trim().toLowerCase();
+		return { entity, full, first: full.split(/\s+/)[0] ?? full };
+	});
+	for (const [i, a] of names.entries()) {
+		for (const b of names.slice(i + 1)) {
+			const alike =
+				a.full === b.full ||
+				a.first === b.full ||
+				b.first === a.full ||
+				(a.entity.kind === 'person' && b.entity.kind === 'person' && a.first === b.first);
+			if (!alike) continue;
+			const ids = [...new Set([a.entity.artifactIds[0], b.entity.artifactIds[0]])].filter(
+				(id): id is string => id !== undefined
+			);
+			const describe = (e: (typeof registry)[number]) =>
+				`“${e.name}” (${e.id}${e.distinguishing ? `, ${e.distinguishing}` : ''})`;
+			push(
+				'ambiguous_entity',
+				'info',
+				ids,
+				[a.entity.id, b.entity.id].toSorted().join('|'),
+				`${describe(a.entity)} and ${describe(b.entity)} look alike by name but have different ids; they are kept as distinct entities and never merged.`,
 				'keep_as_is'
 			);
 		}
-		for (const pre of t.preconditions) {
-			const key = stateKey(pre);
-			if (pre.epistemic !== 'world') continue;
-			preparations.delete(key);
-			const cur = world.get(key);
-			if (cur && cur.value !== pre.value) {
-				clash(
-					cur.artifactId,
-					artifact.id,
-					key,
-					`expects ${String(pre.value)}, but ${title(cur.artifactId)} left it ${String(cur.value)}`
-				);
-			}
-		}
-		for (const eff of t.effects) {
-			const key = stateKey(eff);
-			if (eff.epistemic !== 'world') {
-				const list = beliefs.get(key) ?? [];
-				const holder = eff.holder ?? '(unspecified)';
-				for (const other of list) {
-					if (other.value !== eff.value && other.holder !== holder) {
-						push(
-							'perspective_conflict',
-							'info',
-							[other.artifactId, artifact.id],
-							key,
-							`${other.holder} and ${holder} hold different views on ${key}.`,
-							'mark_intentional'
-						);
-					}
-				}
-				list.push({ value: eff.value, holder, artifactId: artifact.id });
-				beliefs.set(key, list);
-				continue;
-			}
-			const done = irreversibleDone.get(key);
-			if (eff.irreversible && done && done.value === eff.value) {
-				clash(
-					done.artifactId,
-					artifact.id,
-					key,
-					`the irreversible change to ${String(eff.value)} already happened in ${title(done.artifactId)}`,
-					true
-				);
-			}
-			if (eff.irreversible)
-				irreversibleDone.set(key, {
-					value: eff.value,
-					artifactId: artifact.id,
-					irreversible: true
-				});
-			if (preparations.has(key) && preparations.get(key) !== artifact.id) preparations.delete(key);
-			if (eff.preparation) preparations.set(key, artifact.id);
-			world.set(key, { value: eff.value, artifactId: artifact.id, irreversible: eff.irreversible });
-		}
-		if (
-			provenance(artifact.id) !== 'canonical_anchor' &&
-			t.effects.length === 0 &&
-			t.assumptions.length === 0
-		) {
-			push(
-				'redundancy',
-				'info',
-				[artifact.id],
-				null,
-				`${title(artifact.id)} changes no state and adds no fact; this interval may already have sufficient detail.`,
-				'stop_expansion'
-			);
-		}
 	}
-	for (const [key, artifactId] of preparations) {
-		if (path.indexOf(artifactId) < path.length - 1) {
-			push(
-				'abandoned_preparation',
-				'warning',
-				[artifactId],
-				key,
-				`${title(artifactId)} prepares ${key}, but no later beat uses or explains it.`,
-				'request_c_resolution'
-			);
-		}
-	}
+
 	for (const t of detectTensions(graph)) {
 		if (t.resolvedByExpansionId === null) {
 			push(
@@ -428,7 +593,7 @@ export function validateContinuity(
 			);
 		}
 	}
-	return { issues, path, unannotatedArtifactIds: unannotated };
+	return { issues, path: paths.flat(), unannotatedArtifactIds: unannotated };
 }
 
 /** Issues a candidate would ADD to the committed path (used as the accept gate). */

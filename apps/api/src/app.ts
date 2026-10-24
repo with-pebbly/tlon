@@ -1,3 +1,5 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
+
 import {
 	API_PREFIX,
 	TlonError,
@@ -20,6 +22,11 @@ export type BuildAppOptions = {
 	 * output, e.g. to capture logs in tests). Request bodies, headers and query strings are never logged.
 	 */
 	logger?: boolean | { level: string; stream?: LogStream };
+	/**
+	 * Protected mode (`TLON_OPERATOR_TOKEN`): tokenless requests are refused and
+	 * `Authorization: Bearer <operatorToken>` acts as the operator. Unset = ADR 0007 default.
+	 */
+	operatorToken?: string;
 };
 
 /** Matches the 20 MB import limit in the API spec. */
@@ -43,7 +50,8 @@ const BEARER = /^Bearer[ \t]+(\S+)$/i;
  */
 export async function resolvePrincipal(
 	service: TlonService,
-	request: FastifyRequest
+	request: FastifyRequest,
+	operatorToken?: string
 ): Promise<Principal> {
 	const header = request.headers.authorization;
 	if (header !== undefined) {
@@ -52,9 +60,22 @@ export async function resolvePrincipal(
 			await service.recordUnauthenticated('malformed_credentials');
 			throw new TlonError('UNAUTHENTICATED', 'invalid or expired credentials');
 		}
+		// Digests have equal length, so the comparison is constant-time and leaks no length.
+		if (
+			operatorToken !== undefined &&
+			timingSafeEqual(
+				createHash('sha256').update(token).digest(),
+				createHash('sha256').update(operatorToken).digest()
+			)
+		) {
+			return LOCAL_HUMAN;
+		}
 		return service.authenticateToken(token);
 	}
-	if (isLoopbackAddress(request.socket.remoteAddress)) return LOCAL_HUMAN;
+	// Protected mode switches the implicit loopback operator off; only the operator token acts as human.
+	if (operatorToken === undefined && isLoopbackAddress(request.socket.remoteAddress)) {
+		return LOCAL_HUMAN;
+	}
 	await service.recordUnauthenticated('no_credentials');
 	throw new TlonError('UNAUTHENTICATED', 'authentication required');
 }
@@ -102,9 +123,9 @@ type AgentParams = { Params: { projectId: string; principalId: string } };
 type TokenParams = { Params: { projectId: string; principalId: string; tokenId: string } };
 type GrantParams = { Params: { projectId: string; grantId: string } };
 
-export function buildApp({ service, logger }: BuildAppOptions): FastifyInstance {
+export function buildApp({ service, logger, operatorToken }: BuildAppOptions): FastifyInstance {
 	const app = Fastify({ logger: loggerConfig(logger), bodyLimit: BODY_LIMIT_BYTES });
-	const act = (request: FastifyRequest) => resolvePrincipal(service, request);
+	const act = (request: FastifyRequest) => resolvePrincipal(service, request, operatorToken);
 
 	// Empty bodies are valid (e.g. cancelling an expansion); malformed JSON is a typed validation error.
 	app.addContentTypeParser('application/json', { parseAs: 'string' }, (_request, body, done) => {
@@ -152,7 +173,10 @@ export function buildApp({ service, logger }: BuildAppOptions): FastifyInstance 
 	const prefix = API_PREFIX;
 	const project = `${prefix}/projects/:projectId`;
 
-	app.get(`${prefix}/health`, async () => ({ ok: true }));
+	app.get(`${prefix}/health`, async () => ({
+		ok: true,
+		operatorTokenRequired: operatorToken !== undefined
+	}));
 
 	app.get(`${prefix}/projects`, async (request) => service.listProjects(await act(request)));
 	app.post(`${prefix}/projects`, async (request, reply) => {
@@ -491,6 +515,45 @@ export function buildApp({ service, logger }: BuildAppOptions): FastifyInstance 
 	});
 	app.get<ItemParams>(`${project}/facts/:id/rationale`, async (request) =>
 		service.getFactRationale(await act(request), request.params.projectId, request.params.id)
+	);
+
+	app.get<ProjectParams>(`${project}/connections`, async (request) =>
+		service.listConnections(await act(request), request.params.projectId)
+	);
+	app.post<ProjectParams>(`${project}/connections`, async (request, reply) => {
+		const created = await service.createConnection(
+			await act(request),
+			request.params.projectId,
+			request.body
+		);
+		return reply.code(201).send(created);
+	});
+	app.patch<{ Params: { projectId: string; connectionId: string } }>(
+		`${project}/connections/:connectionId`,
+		async (request) =>
+			service.updateConnection(
+				await act(request),
+				request.params.projectId,
+				request.params.connectionId,
+				request.body
+			)
+	);
+	app.get<ProjectParams>(`${project}/completion`, async (request) =>
+		service.getCompletion(await act(request), request.params.projectId, request.query)
+	);
+	app.post<ProjectParams>(`${project}/certify`, async (request, reply) => {
+		const certification = await service.certify(
+			await act(request),
+			request.params.projectId,
+			request.body
+		);
+		return reply.code(201).send(certification);
+	});
+	app.get<ProjectParams>(`${project}/certifications`, async (request) =>
+		service.listCertifications(await act(request), request.params.projectId)
+	);
+	app.get<ProjectParams>(`${project}/audit`, async (request) =>
+		service.getAudit(await act(request), request.params.projectId)
 	);
 
 	app.get<ProjectParams>(`${project}/audit/own`, async (request) =>

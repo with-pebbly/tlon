@@ -36,6 +36,13 @@
       "when": 1792877183663,
       "tag": "0004_block_fact",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1792881976631,
+      "tag": "0005_completion_audit",
+      "breakpoints": true
     }
   ]
 }

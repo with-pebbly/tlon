@@ -1,12 +1,19 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
-	import { PARTICIPANT_ROLE_TEXT, TASK_STATE_CLASS, TASK_TYPE_SHORT } from '$lib/protocol';
+	import {
+		COMPLETION_POLICY_HINT,
+		COMPLETION_POLICY_LABEL,
+		PARTICIPANT_ROLE_TEXT,
+		TASK_STATE_CLASS,
+		TASK_TYPE_SHORT
+	} from '$lib/protocol';
 	import { setWorkspace } from '$lib/state/context';
 	import { toasts } from '$lib/state/toasts.svelte';
 	import { Workspace } from '$lib/state/workspace.svelte';
 	import { formatTime } from '$lib/ui';
 	import {
 		AGENT_ROLES,
+		CompletionPolicy,
 		EXECUTOR_KINDS,
 		MAX_AGENT_TOKEN_TTL_SECONDS,
 		type AgentRole,
@@ -15,6 +22,9 @@
 	} from '@tlon/contracts';
 	import { onMount } from 'svelte';
 
+	import AuditPanel from './AuditPanel.svelte';
+	import CompletionPanel from './CompletionPanel.svelte';
+	import ConnectionsPanel from './ConnectionsPanel.svelte';
 	import TriangleCard from './TriangleCard.svelte';
 
 	let { projectId }: { projectId: string } = $props();
@@ -41,6 +51,7 @@
 	let briefB = $state('');
 	let factReview = $state<'facilitator' | 'mediator'>('facilitator');
 	let maxDepth = $state(3);
+	let completionPolicy = $state<CompletionPolicy>('exploratory');
 
 	let gapLeft = $state('');
 	let gapRight = $state('');
@@ -116,7 +127,7 @@
 		event.preventDefault();
 		if (briefA.trim() === '' || briefB.trim() === '') return;
 		void run('run', async () => {
-			await ws.startRun({ briefA, briefB, config: { factReview, maxDepth } });
+			await ws.startRun({ briefA, briefB, config: { factReview, maxDepth, completionPolicy } });
 			briefA = '';
 			briefB = '';
 			toasts.push('info', 'Run started: A and B have their seed tasks.');
@@ -276,6 +287,19 @@
 								bind:value={maxDepth}
 							/>
 						</div>
+						<div>
+							<label class="label" for="run-completion">Aims for</label>
+							<select
+								id="run-completion"
+								class="input"
+								title={COMPLETION_POLICY_HINT[completionPolicy]}
+								bind:value={completionPolicy}
+							>
+								{#each CompletionPolicy.options as option (option)}
+									<option value={option}>{COMPLETION_POLICY_LABEL[option]}</option>
+								{/each}
+							</select>
+						</div>
 						<button
 							class="btn btn-primary ml-auto"
 							type="submit"
@@ -292,7 +316,9 @@
 								<span>{r.status}</span>
 								<span class="text-xs text-zinc-500"
 									>{r.config.participantMode} · facts by {r.config.factReview} · depth ≤ {r.config
-										.maxDepth}</span
+										.maxDepth} · aims for {COMPLETION_POLICY_LABEL[
+										r.config.completionPolicy ?? 'exploratory'
+									]}</span
 								>
 								<span class="ml-auto text-xs text-zinc-500">{formatTime(r.createdAt)}</span>
 							</li>
@@ -363,6 +389,10 @@
 					>
 				</form>
 			</section>
+
+			<CompletionPanel />
+			<ConnectionsPanel />
+			<div class="lg:col-span-2"><AuditPanel /></div>
 
 			<section class="flex flex-col gap-3 lg:col-span-2" aria-labelledby="triangles-h">
 				<h2 id="triangles-h" class="font-semibold text-zinc-900">Triangles</h2>

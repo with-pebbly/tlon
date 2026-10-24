@@ -19,6 +19,7 @@ import {
 	IssueList,
 	IssuedToken,
 	ProjectGraph,
+	ProtocolState,
 	TransitionAnnotation
 } from '../../contracts/src/index.ts';
 import { storyBeats } from '../../core/src/index.ts';
@@ -61,8 +62,10 @@ async function operator<T>(
 }
 
 const graph = await operator('GET', '/graph', ProjectGraph);
+// Block–Fact projects: triangles define the reading order (Facts are never beats).
+const { triangles } = await operator('GET', '/protocol', ProtocolState);
 const annotated = new Set(graph.transitions.map((t) => t.artifactId));
-const beats = storyBeats(graph);
+const beats = storyBeats({ ...graph, triangles });
 const todo = beats.filter((b) => !values['only-missing'] || !annotated.has(b.artifact.id));
 console.log(`${beats.length} beats in story order, ${todo.length} to annotate`);
 

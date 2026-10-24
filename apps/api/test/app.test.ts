@@ -73,7 +73,7 @@ async function setup() {
 
 describe('HTTP mapping', () => {
 	it('serves health and typed 404 / validation errors', async () => {
-		expect((await api('GET', '/health')).body).toEqual({ ok: true });
+		expect((await api('GET', '/health')).body).toEqual({ ok: true, operatorTokenRequired: false });
 
 		const missing = await api<ApiErrorBody>('GET', '/nope');
 		expect(missing.status).toBe(404);

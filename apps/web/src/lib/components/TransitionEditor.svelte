@@ -1,9 +1,12 @@
 <script lang="ts">
 	import { clockOf, MONOTONIC_BADGE } from '$lib/continuity';
 	import {
+		BEAT_FUNCTIONS,
+		EntityRef,
 		Transition,
 		type Assertion,
 		type AssertionInput,
+		type BeatFunction,
 		type TransitionInput
 	} from '@tlon/contracts';
 
@@ -24,6 +27,13 @@
 		monotonic: Assertion['monotonic'] | '';
 	};
 	type EventList = 'events' | 'repeatableEvents';
+	type EntityRow = {
+		uid: number;
+		id: string;
+		name: string;
+		kind: EntityRef['kind'];
+		distinguishing: string;
+	};
 
 	let {
 		initial,
@@ -61,6 +71,15 @@
 			hint: 'may legitimately recur (a second phone call)'
 		}
 	];
+	const ENTITY_KINDS = EntityRef.shape.kind.options;
+	const FUNCTION_LABEL: Record<BeatFunction, string> = {
+		new_decision: 'new decision',
+		irreversible_change: 'irreversible change',
+		new_constraint: 'new constraint',
+		stake_shift: 'stake shift',
+		revelation: 'revelation',
+		causal_dependency: 'causal dependency'
+	};
 
 	let nextUid = 0;
 	const toRow = (a: Assertion | null): Row => ({
@@ -91,18 +110,38 @@
 
 	/** Story time as typed: Day N is 1-based in the form, `day` 0-based in the contract. */
 	let time = $state<{
+		year: number | null;
 		day: number | null;
 		clock: string;
+		relative: string;
 		approx: boolean;
 		tolerance: number | null;
 		outOfOrder: boolean;
 	}>({
+		year: start?.time?.year ?? null,
 		day: start?.time?.day === undefined ? null : start.time.day + 1,
 		clock: start?.time?.minute === undefined ? '' : clockOf(start.time.minute),
+		relative: start?.time?.relative ?? '',
 		approx: start?.time?.approx ?? false,
 		tolerance: start?.time?.toleranceMinutes ?? 0,
 		outOfOrder: start?.time?.outOfOrder ?? false
 	});
+	let entities = $state<EntityRow[]>(
+		(start?.entities ?? []).map((e) => ({
+			uid: nextUid++,
+			id: e.id,
+			name: e.name,
+			kind: e.kind,
+			distinguishing: e.distinguishing ?? ''
+		}))
+	);
+	let functions = $state<BeatFunction[]>([...(start?.functions ?? [])]);
+
+	function toggleFunction(fn: BeatFunction) {
+		const at = functions.indexOf(fn);
+		if (at === -1) functions.push(fn);
+		else functions.splice(at, 1);
+	}
 	let events = $state<Record<EventList, string[]>>({
 		events: [...(start?.events ?? [])],
 		repeatableEvents: [...(start?.repeatableEvents ?? [])]
@@ -116,16 +155,27 @@
 	}
 
 	function toTime(): TransitionInput['time'] {
+		const year = typeof time.year === 'number' ? time.year : undefined;
 		const day = typeof time.day === 'number' ? time.day - 1 : undefined;
 		const [hours, minutes] = time.clock.split(':').map(Number);
 		const minute =
 			time.clock === '' || hours === undefined || minutes === undefined
 				? undefined
 				: hours * 60 + minutes;
-		if (day === undefined && minute === undefined && !time.outOfOrder) return undefined;
+		const relative = time.relative.trim();
+		if (
+			year === undefined &&
+			day === undefined &&
+			minute === undefined &&
+			relative === '' &&
+			!time.outOfOrder
+		)
+			return undefined;
 		return {
+			...(year === undefined ? {} : { year }),
 			...(day === undefined ? {} : { day }),
 			...(minute === undefined ? {} : { minute }),
+			...(relative === '' ? {} : { relative }),
 			approx: time.approx,
 			toleranceMinutes: time.approx ? (time.tolerance ?? 0) : 0,
 			outOfOrder: time.outOfOrder
@@ -164,7 +214,14 @@
 			assumptions: rows.assumptions.map(toAssertion),
 			...(at ? { time: at } : {}),
 			events: [...events.events],
-			repeatableEvents: [...events.repeatableEvents]
+			repeatableEvents: [...events.repeatableEvents],
+			entities: entities.map((e) => {
+				const entity: EntityRef = { id: e.id.trim(), name: e.name.trim(), kind: e.kind };
+				const distinguishing = e.distinguishing.trim();
+				if (distinguishing !== '') entity.distinguishing = distinguishing;
+				return entity;
+			}),
+			functions: [...functions]
 		};
 	});
 	const checked = $derived(Transition.safeParse(draft));
@@ -187,6 +244,16 @@
 			<span class="text-[11px] text-zinc-400">when the beat happens, as far as the text says</span>
 		</legend>
 		<div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-zinc-600">
+			<label class="flex items-center gap-1"
+				>Year <input
+					type="number"
+					step="1"
+					class="input h-6 w-20 text-xs"
+					placeholder="—"
+					aria-label="Calendar year"
+					bind:value={time.year}
+				/></label
+			>
 			<label class="flex items-center gap-1"
 				>Day <input
 					type="number"
@@ -227,6 +294,13 @@
 				><input type="checkbox" bind:checked={time.outOfOrder} /> flashback</label
 			>
 		</div>
+		<input
+			class="input h-6 text-xs"
+			placeholder="relative time, verbatim (eleven winters before the church closed)"
+			title="A relative statement whose absolute date is unknown — kept as written, never turned into a year"
+			aria-label="Relative time statement"
+			bind:value={time.relative}
+		/>
 	</fieldset>
 
 	{#each EVENT_LISTS as list (list.key)}
@@ -267,6 +341,79 @@
 			</div>
 		</fieldset>
 	{/each}
+
+	<fieldset class="flex flex-col gap-1.5">
+		<legend class="mb-1 flex w-full items-baseline gap-2">
+			<span class="label mb-0">Entities</span>
+			<span class="text-[11px] text-zinc-400"
+				>who / what the beat mentions — identity is the id, never the name</span
+			>
+		</legend>
+		{#each entities as entity, index (entity.uid)}
+			<div class="flex flex-wrap items-center gap-1">
+				<input
+					class="input h-6 w-36 font-mono text-xs"
+					placeholder="id (prokhor_dyatlov)"
+					aria-label="Entity {index + 1} id"
+					bind:value={entity.id}
+				/>
+				<input
+					class="input h-6 w-28 text-xs"
+					placeholder="name"
+					aria-label="Entity {index + 1} name"
+					bind:value={entity.name}
+				/>
+				<select
+					class="input h-6 w-auto py-0 text-xs"
+					aria-label="Entity {index + 1} kind"
+					bind:value={entity.kind}
+				>
+					{#each ENTITY_KINDS as kind (kind)}<option value={kind}>{kind}</option>{/each}
+				</select>
+				<input
+					class="input h-6 min-w-0 flex-1 text-xs"
+					placeholder="distinguishing (surname, surface, era)"
+					aria-label="Entity {index + 1} distinguishing detail"
+					bind:value={entity.distinguishing}
+				/>
+				<button
+					type="button"
+					class="btn btn-ghost btn-sm px-1 text-zinc-400"
+					aria-label="Remove entity {index + 1}"
+					onclick={() => entities.splice(index, 1)}>✕</button
+				>
+			</div>
+		{/each}
+		<button
+			type="button"
+			class="btn btn-sm self-start"
+			onclick={() =>
+				entities.push({ uid: nextUid++, id: '', name: '', kind: 'person', distinguishing: '' })}
+			>+ entity</button
+		>
+	</fieldset>
+
+	<fieldset class="flex flex-col gap-1.5">
+		<legend class="mb-1 flex w-full items-baseline gap-2">
+			<span class="label mb-0">Story function</span>
+			<span class="text-[11px] text-zinc-400">advisory — quiet beats may have none</span>
+		</legend>
+		<div class="flex flex-wrap items-center gap-1">
+			{#each BEAT_FUNCTIONS as fn (fn)}
+				<button
+					type="button"
+					class={[
+						'chip',
+						functions.includes(fn)
+							? 'border-accent-500 bg-accent-50 text-accent-700'
+							: 'border-zinc-200 bg-white text-zinc-500'
+					]}
+					aria-pressed={functions.includes(fn)}
+					onclick={() => toggleFunction(fn)}>{FUNCTION_LABEL[fn]}</button
+				>
+			{/each}
+		</div>
+	</fieldset>
 
 	{#each SECTIONS as section (section.key)}
 		<fieldset class="flex flex-col gap-1.5">

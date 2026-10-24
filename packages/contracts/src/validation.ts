@@ -60,15 +60,20 @@ export type AssertionInput = z.input<typeof Assertion>;
 /**
  * When a beat happens in story time, as far as the text says. `day` is a relative day
  * index within the story (0 = first day), `minute` minutes after that day's midnight.
- * Either may be absent; `approx` widens comparisons by `toleranceMinutes`.
+ * `year` (calendar year) places beats of multi-era stories; `relative` keeps a relative
+ * statement whose absolute date is unknown ("eleven winters before the church closed")
+ * verbatim instead of guessing a year. Any field may be absent; `approx` widens
+ * comparisons by `toleranceMinutes` (or one year for `year`).
  */
 export const BeatTime = z.object({
+	year: z.int().min(-100_000).max(100_000).optional(),
 	day: z.int().min(-100_000).max(100_000).optional(),
 	minute: z
 		.int()
 		.min(0)
 		.max(24 * 60 - 1)
 		.optional(),
+	relative: z.string().trim().max(200).optional(),
 	approx: z.boolean().default(false),
 	toleranceMinutes: z
 		.int()
@@ -79,6 +84,33 @@ export const BeatTime = z.object({
 	outOfOrder: z.boolean().default(false)
 });
 export type BeatTime = z.infer<typeof BeatTime>;
+
+/**
+ * A stable identity a beat mentions (BLOCK_FACT_V2 review §4.3). Identity is the `id`,
+ * never the display name: two people called Прохор are two entities
+ * (`prokhor_dyatlov`, `prokhor_averyanov`), two identical inscriptions on different
+ * surfaces are two instances. Assertion subjects should use these ids.
+ */
+export const EntityRef = z.object({
+	id: Key,
+	name: z.string().trim().min(1).max(120),
+	kind: z.enum(['person', 'object', 'place', 'inscription', 'phenomenon', 'group', 'other']),
+	/** What tells it apart from same-named entities (surname, surface, era). */
+	distinguishing: z.string().trim().max(200).optional()
+});
+export type EntityRef = z.infer<typeof EntityRef>;
+
+/** Story function of a beat (review ISSUE-09). Advisory; quiet beats legitimately have none. */
+export const BEAT_FUNCTIONS = [
+	'new_decision',
+	'irreversible_change',
+	'new_constraint',
+	'stake_shift',
+	'revelation',
+	'causal_dependency'
+] as const;
+export const BeatFunction = z.enum(BEAT_FUNCTIONS);
+export type BeatFunction = z.infer<typeof BeatFunction>;
 
 const EventId = z
 	.string()
@@ -97,7 +129,10 @@ export const Transition = z.object({
 	/** Unique story events this beat performs (each may happen once on the path unless repeatable). */
 	events: z.array(EventId).max(20).default([]),
 	/** Events this beat performs that may legitimately recur (a second phone call). */
-	repeatableEvents: z.array(EventId).max(20).default([])
+	repeatableEvents: z.array(EventId).max(20).default([]),
+	/** Identities this beat mentions; the registry is the union over annotations. */
+	entities: z.array(EntityRef).max(40).default([]),
+	functions: z.array(BeatFunction).max(6).default([])
 });
 export type Transition = z.infer<typeof Transition>;
 export type TransitionInput = z.input<typeof Transition>;
@@ -159,6 +194,13 @@ export const ISSUE_KINDS = [
 	'monotonic_violation',
 	/** State differs across a gap of unnarrated beats: a transition is probably missing. */
 	'missing_transition',
+	/**
+	 * Block–Fact: a continuation's story time contradicts the direction it was asked to
+	 * write in (a `backward` Block dated after its own anchor).
+	 */
+	'direction_mismatch',
+	/** Different entity ids share a display name: kept distinct, flagged for the reader. */
+	'ambiguous_entity',
 	'unknown'
 ] as const;
 export const IssueKind = z.enum(ISSUE_KINDS);

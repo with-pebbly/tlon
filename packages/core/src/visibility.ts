@@ -68,7 +68,12 @@ export type GatewayAction =
 	| 'protocol.facilitate'
 	| 'triangle.read'
 	| 'task.own'
-	| 'fact.rationale.read';
+	| 'fact.rationale.read'
+	| 'connection.read'
+	| 'connection.write'
+	| 'completion.read'
+	| 'completion.certify'
+	| 'audit.read';
 
 /**
  * Role → action matrix (§7.1/§7.4, MVP approval policy: human reviews). A/B never see
@@ -98,7 +103,12 @@ const ALLOWED: Record<Principal['role'], readonly GatewayAction[]> = {
 		'issue.dismiss',
 		'protocol.facilitate',
 		'triangle.read',
-		'fact.rationale.read'
+		'fact.rationale.read',
+		'connection.read',
+		'connection.write',
+		'completion.read',
+		'completion.certify',
+		'audit.read'
 	],
 	C: [
 		'project.read',
@@ -123,7 +133,9 @@ const ALLOWED: Record<Principal['role'], readonly GatewayAction[]> = {
 		'expansion.read',
 		'composite.read',
 		'validation.read',
-		'triangle.read'
+		'triangle.read',
+		'connection.read',
+		'completion.read'
 	],
 	A: [
 		'project.read',

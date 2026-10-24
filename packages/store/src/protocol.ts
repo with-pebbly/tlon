@@ -36,9 +36,7 @@ import {
 	type TaskType,
 	type TaskView,
 	TlonError,
-	type Triangle,
 	type TriangleDetail,
-	type TriangleStatus,
 	lintFactText,
 	parseStructured
 } from '@tlon/contracts';
@@ -47,6 +45,7 @@ import { and, asc, desc, eq, inArray, isNull, ne, or, sql, type SQL } from 'driz
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 
 import { appendRevision, insertArtifact } from './artifacts.ts';
+import { buildInputManifest, loadCertifications, loadConnections } from './completion.ts';
 import { compositeMethods } from './composites.ts';
 import type { Db } from './db.ts';
 import { hashToken, toAgent } from './gateway.ts';
@@ -59,10 +58,12 @@ import {
 	parseInput,
 	type Ctx
 } from './internal.ts';
-import { getArtifactRow, loadRelations, selectArtifacts } from './projections.ts';
+import { getArtifactRow, loadRelations, loadTriangles, selectArtifacts } from './projections.ts';
 import { assertEndpointsInProject } from './relations.ts';
 import {
 	agentPrincipals,
+	completionCertifications,
+	narrativeConnections,
 	agentTokens,
 	artifactRevisions,
 	artifacts,
@@ -143,64 +144,6 @@ function toFactAnchor(row: FactAnchorRow): FactAnchor {
 		fact: { artifactId: row.factArtifactId, revisionId: row.factRevisionId },
 		createdAt: row.createdAt.toISOString()
 	};
-}
-
-async function loadTriangles(q: Db, projectId: string, where?: SQL): Promise<Triangle[]> {
-	const rows = await q
-		.select()
-		.from(triangles)
-		.where(and(eq(triangles.projectId, projectId), where))
-		.orderBy(asc(triangles.createdAt), asc(triangles.id));
-	if (rows.length === 0) return [];
-	const continuations: Array<typeof triangleContinuations.$inferSelect> = [];
-	for (const part of chunk(
-		rows.map((r) => r.id),
-		IN_CHUNK
-	)) {
-		continuations.push(
-			...(await q
-				.select()
-				.from(triangleContinuations)
-				.where(inArray(triangleContinuations.triangleId, part)))
-		);
-	}
-	return rows.map((r) => ({
-		id: r.id,
-		projectId: r.projectId,
-		runId: r.runId,
-		left: {
-			artifactId: r.leftArtifactId,
-			revisionId: r.leftRevisionId,
-			factAnchorId: r.leftFactAnchorId
-		},
-		right: {
-			artifactId: r.rightArtifactId,
-			revisionId: r.rightRevisionId,
-			factAnchorId: r.rightFactAnchorId
-		},
-		fact:
-			r.factArtifactId !== null && r.factRevisionId !== null
-				? { artifactId: r.factArtifactId, revisionId: r.factRevisionId }
-				: null,
-		status: r.status as TriangleStatus,
-		stageIndex: r.stageIndex,
-		depth: r.depth,
-		parentTriangleId: r.parentTriangleId,
-		advance: { left: r.leftDirection as Direction, right: r.rightDirection as Direction },
-		continuations: continuations
-			.filter((c) => c.triangleId === r.id)
-			.map((c) => ({
-				side: c.side as Side,
-				block: { artifactId: c.artifactId, revisionId: c.revisionId },
-				taskId: c.taskId
-			}))
-			.sort(
-				(a, b) =>
-					a.side.localeCompare(b.side) || a.block.artifactId.localeCompare(b.block.artifactId)
-			),
-		createdAt: r.createdAt.toISOString(),
-		updatedAt: r.updatedAt.toISOString()
-	}));
 }
 
 async function getTriangleRow(
@@ -404,8 +347,56 @@ type GapInput = {
 	advance: { left: Direction; right: Direction };
 };
 
+/** SAME_SIDE_GAP: a gap needs opposed sides, so two anchors of one private scope are refused. */
+async function assertOpposedAnchors(
+	q: Db,
+	projectId: string,
+	leftId: string,
+	rightId: string
+): Promise<void> {
+	const rows = await q
+		.select({ scope: artifacts.ownerScope })
+		.from(artifacts)
+		.where(and(eq(artifacts.projectId, projectId), inArray(artifacts.id, [leftId, rightId])));
+	const [first, second] = rows;
+	if (rows.length === 2 && first?.scope === second?.scope) {
+		if (first?.scope === 'A_PRIVATE' || first?.scope === 'B_PRIVATE') {
+			throw new TlonError(
+				'SAME_SIDE_GAP',
+				'both anchors belong to the same private side; a gap needs opposed sides',
+				{ side: first.scope === 'A_PRIVATE' ? 'A' : 'B' }
+			);
+		}
+	}
+}
+
+/** Records what this executor was served (IDs only) as the task's last-served input manifest. */
+async function recordInputManifest(
+	ctx: Ctx,
+	q: Db,
+	principal: Principal,
+	projectId: string,
+	task: ProtocolTaskRow,
+	view: TaskView
+): Promise<void> {
+	const block = (b: BlockView) => ({ artifactId: b.id, revisionId: b.revisionId });
+	const fact = (f: FactView) => ({ artifactId: f.id, revisionId: f.revisionId });
+	let inputs: Array<{ artifactId: string; revisionId: string }> = [];
+	if (view.type === 'propose_fact') {
+		inputs = [block(view.left), block(view.right), ...view.existingFacts.map(fact)];
+	} else if (view.type === 'advance_block') {
+		inputs = [block(view.ownBlock), ...view.localContext.map(block), fact(view.fact)];
+	}
+	const manifest = await buildInputManifest(ctx, q, principal, projectId, inputs);
+	await q
+		.update(protocolTasks)
+		.set({ inputManifest: manifest })
+		.where(eq(protocolTasks.id, task.id));
+}
+
 /** A Triangle without a Fact yet, plus C's `propose_fact` task. */
 async function openGap(ctx: Ctx, q: Db, gap: GapInput): Promise<TriangleRow> {
+	await assertOpposedAnchors(q, gap.projectId, gap.left.artifactId, gap.right.artifactId);
 	const now = ctx.now();
 	const [row] = await q
 		.insert(triangles)
@@ -1178,7 +1169,11 @@ export function protocolMethods(ctx: Ctx) {
 					principal.kind === 'HUMAN' ? 'protocol.facilitate' : 'task.own'
 				);
 				const task = await lockTask(tx, principal, projectId, taskId, false);
-				return buildView(ctx, tx, principal, projectId, task);
+				const view = await buildView(ctx, tx, principal, projectId, task);
+				if (principal.kind === 'AGENT') {
+					await recordInputManifest(ctx, tx, principal, projectId, task, view);
+				}
+				return view;
 			});
 		},
 
@@ -1795,7 +1790,14 @@ export function protocolMethods(ctx: Ctx) {
 type ProtocolBundle = Required<
 	Pick<
 		ExportBundle,
-		'runs' | 'triangles' | 'tasks' | 'factCandidates' | 'factRationales' | 'factAnchors'
+		| 'runs'
+		| 'triangles'
+		| 'tasks'
+		| 'factCandidates'
+		| 'factRationales'
+		| 'factAnchors'
+		| 'connections'
+		| 'certifications'
 	>
 >;
 
@@ -1807,7 +1809,9 @@ export function protocolPart(bundle: ExportBundle): ProtocolBundle {
 		tasks: bundle.tasks ?? [],
 		factCandidates: bundle.factCandidates ?? [],
 		factRationales: bundle.factRationales ?? [],
-		factAnchors: bundle.factAnchors ?? []
+		factAnchors: bundle.factAnchors ?? [],
+		connections: bundle.connections ?? [],
+		certifications: bundle.certifications ?? []
 	};
 }
 
@@ -1853,7 +1857,9 @@ export async function loadProtocolExport(
 			rationale: r.rationale,
 			createdAt: r.createdAt.toISOString()
 		})),
-		factAnchors: anchorRows.map(toFactAnchor)
+		factAnchors: anchorRows.map(toFactAnchor),
+		connections: await loadConnections(q, projectId),
+		certifications: await loadCertifications(q, projectId)
 	};
 }
 
@@ -1937,6 +1943,16 @@ export function findProtocolIntegrityIssues(whole: ExportBundle): ProtocolIssue[
 			issues.push({ path: 'factRationales', message: 'unknown artifact', ref: r.factArtifactId });
 		}
 	}
+	for (const c of bundle.connections) {
+		const at = `connections.${c.id}`;
+		for (const id of [
+			...c.endpointIds,
+			...c.realizedByIds,
+			...(c.factArtifactId ? [c.factArtifactId] : [])
+		]) {
+			if (!artifactIds.has(id)) issues.push({ path: at, message: 'unknown artifact', ref: id });
+		}
+	}
 	return issues;
 }
 
@@ -1949,7 +1965,19 @@ export function protocolIdChecks(
 		['factAnchors', factAnchors, factAnchors.id, bundle.factAnchors.map((a) => a.id)],
 		['triangles', triangles, triangles.id, bundle.triangles.map((t) => t.id)],
 		['tasks', protocolTasks, protocolTasks.id, bundle.tasks.map((t) => t.id)],
-		['factCandidates', factCandidates, factCandidates.id, bundle.factCandidates.map((c) => c.id)]
+		['factCandidates', factCandidates, factCandidates.id, bundle.factCandidates.map((c) => c.id)],
+		[
+			'connections',
+			narrativeConnections,
+			narrativeConnections.id,
+			bundle.connections.map((c) => c.id)
+		],
+		[
+			'certifications',
+			completionCertifications,
+			completionCertifications.id,
+			bundle.certifications.map((c) => c.id)
+		]
 	];
 }
 
@@ -2078,6 +2106,43 @@ export async function insertProtocolImport(
 			projectId,
 			rationale: r.rationale,
 			createdAt: date(r.createdAt)
+		});
+	}
+	for (const c of bundle.connections) {
+		await q.insert(narrativeConnections).values({
+			id: pid(c.id),
+			projectId,
+			kind: c.kind,
+			endpointAId: art(c.endpointIds[0]),
+			endpointBId: art(c.endpointIds[1]),
+			factArtifactId: c.factArtifactId === null ? null : art(c.factArtifactId),
+			realizedByIds: c.realizedByIds.map(art),
+			statement: c.statement,
+			confidence: c.confidence,
+			status: c.status,
+			source: c.source,
+			approvedBy: c.approvedBy,
+			createdAt: date(c.createdAt),
+			updatedAt: date(c.updatedAt)
+		});
+	}
+	for (const c of bundle.certifications) {
+		await q.insert(completionCertifications).values({
+			id: pid(c.id),
+			projectId,
+			policy: c.policy,
+			actorId: c.actorId,
+			// The snapshot's references follow the remapped ids.
+			report: {
+				...c.report,
+				openQuestions: c.report.openQuestions.map((oq) => ({
+					...oq,
+					connectionId: oq.connectionId === null ? null : pid(oq.connectionId),
+					endpointIds: oq.endpointIds.map(art)
+				})),
+				motifSignals: c.report.motifSignals.map((m) => ({ ...m, artifactId: art(m.artifactId) }))
+			},
+			createdAt: date(c.createdAt)
 		});
 	}
 }

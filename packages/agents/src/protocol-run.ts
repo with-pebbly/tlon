@@ -16,8 +16,9 @@
  *
  * Usage: bun packages/agents/src/protocol-run.ts --start "An old man plants a tree." \
  *          --end "The universe collapses." [--target 24] [--max-depth 11] [--title "..."]
- *          [--out ~/Desktop/story.md] [--review]
+ *          [--out ~/Desktop/story.md] [--review] [--skip-analyze]
  */
+import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
@@ -62,6 +63,7 @@ const { values } = parseArgs({
 		'max-depth': { type: 'string', default: '11' },
 		out: { type: 'string' },
 		review: { type: 'boolean', default: false },
+		'skip-analyze': { type: 'boolean', default: false },
 		api: { type: 'string', default: process.env.TLON_API_URL ?? 'http://127.0.0.1:3001' }
 	}
 });
@@ -479,3 +481,13 @@ console.log(
 	)
 );
 if (failures.length > 0) process.exitCode = 1;
+else if (!values.review && !values['skip-analyze']) {
+	// Organizer analysis: extraction, join review (ai_review suggestions only), completion
+	// report, isolation audit and the reader / organizer / chronology exports.
+	const result = spawnSync(
+		'bun',
+		['packages/agents/src/analyze.ts', '--project', project.id, '--out', out, '--api', api],
+		{ cwd: new URL('../../../', import.meta.url).pathname, stdio: 'inherit' }
+	);
+	if (result.status !== 0) process.exitCode = result.status ?? 1;
+}

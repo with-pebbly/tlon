@@ -1,3 +1,4 @@
+import type { CompletionReport, InputManifest } from '@tlon/contracts';
 import { sql } from 'drizzle-orm';
 import {
 	boolean,
@@ -574,6 +575,7 @@ export const protocolTasks = pgTable(
 			.$type<Array<{ artifactId: string; revisionId: string }>>()
 			.notNull(),
 		submitIdempotencyKey: text('submit_idempotency_key'),
+		inputManifest: jsonb('input_manifest').$type<InputManifest>(),
 		createdAt: ts('created_at').notNull(),
 		submittedAt: ts('submitted_at')
 	},
@@ -623,6 +625,66 @@ export const factCandidates = pgTable(
 	]
 );
 
+/**
+ * Organizer-only narrative relations beyond a shared Fact (review §4.1). Never visible to
+ * A/B/C; may hold cross-side reasoning. `fact_link` is derived from triangles, not stored.
+ */
+export const narrativeConnections = pgTable(
+	'narrative_connections',
+	{
+		id: uuid('id').primaryKey(),
+		projectId: uuid('project_id')
+			.notNull()
+			.references(() => projects.id),
+		kind: text('kind').notNull(),
+		endpointAId: uuid('endpoint_a_id').notNull(),
+		endpointBId: uuid('endpoint_b_id').notNull(),
+		factArtifactId: uuid('fact_artifact_id'),
+		realizedByIds: jsonb('realized_by_ids').$type<string[]>().notNull(),
+		statement: text('statement').notNull(),
+		confidence: text('confidence').notNull(),
+		status: text('status').notNull(),
+		source: text('source').notNull(),
+		approvedBy: text('approved_by'),
+		createdAt: ts('created_at').notNull(),
+		updatedAt: ts('updated_at').notNull()
+	},
+	(t) => [
+		foreignKey({
+			name: 'narrative_connections_a_fk',
+			columns: [t.projectId, t.endpointAId],
+			foreignColumns: [artifacts.projectId, artifacts.id]
+		}),
+		foreignKey({
+			name: 'narrative_connections_b_fk',
+			columns: [t.projectId, t.endpointBId],
+			foreignColumns: [artifacts.projectId, artifacts.id]
+		}),
+		foreignKey({
+			name: 'narrative_connections_fact_fk',
+			columns: [t.projectId, t.factArtifactId],
+			foreignColumns: [artifacts.projectId, artifacts.id]
+		}),
+		index('narrative_connections_project_idx').on(t.projectId, t.createdAt)
+	]
+);
+
+/** A human's explicit "this run meets policy X" act, with the report it was based on. */
+export const completionCertifications = pgTable(
+	'completion_certifications',
+	{
+		id: uuid('id').primaryKey(),
+		projectId: uuid('project_id')
+			.notNull()
+			.references(() => projects.id),
+		policy: text('policy').notNull(),
+		actorId: text('actor_id').notNull(),
+		report: jsonb('report').$type<CompletionReport>().notNull(),
+		createdAt: ts('created_at').notNull()
+	},
+	(t) => [index('completion_certifications_project_idx').on(t.projectId, t.createdAt)]
+);
+
 export type CompositeDefinitionRow = typeof compositeDefinitions.$inferSelect;
 export type CompositeMemberRow = typeof compositeMembers.$inferSelect;
 
@@ -641,4 +703,6 @@ export type ProtocolRunRow = typeof protocolRuns.$inferSelect;
 export type ProtocolTaskRow = typeof protocolTasks.$inferSelect;
 export type TriangleRow = typeof triangles.$inferSelect;
 export type FactCandidateRow = typeof factCandidates.$inferSelect;
+export type NarrativeConnectionRow = typeof narrativeConnections.$inferSelect;
+export type CompletionCertificationRow = typeof completionCertifications.$inferSelect;
 export type FactAnchorRow = typeof factAnchors.$inferSelect;
