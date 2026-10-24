@@ -8,3 +8,4 @@ export * from './visibility.ts';
 export * from './pyramid.ts';
 export * from './story.ts';
 export * from './composites.ts';
+export * from './continuity.ts';

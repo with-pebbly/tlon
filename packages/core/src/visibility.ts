@@ -58,7 +58,10 @@ export type GatewayAction =
 	| 'disclosure.review'
 	| 'disclosure.read'
 	| 'export'
-	| 'import';
+	| 'import'
+	| 'composite.create'
+	| 'composite.revise'
+	| 'composite.read';
 
 /**
  * Role → action matrix (§7.1/§7.4, MVP approval policy: human reviews). A/B never see
@@ -79,7 +82,10 @@ const ALLOWED: Record<Principal['role'], readonly GatewayAction[]> = {
 		'disclosure.review',
 		'disclosure.read',
 		'export',
-		'import'
+		'import',
+		'composite.create',
+		'composite.revise',
+		'composite.read'
 	],
 	C: [
 		'project.read',
@@ -89,11 +95,28 @@ const ALLOWED: Record<Principal['role'], readonly GatewayAction[]> = {
 		'expansion.open',
 		'expansion.submit_candidate',
 		'disclosure.propose',
-		'disclosure.read'
+		'disclosure.read',
+		'composite.create',
+		'composite.revise',
+		'composite.read'
 	],
-	VALIDATOR: ['project.read', 'expansion.read'],
-	A: ['project.read', 'artifact.create', 'relation.create'],
-	B: ['project.read', 'artifact.create', 'relation.create']
+	VALIDATOR: ['project.read', 'expansion.read', 'composite.read'],
+	A: [
+		'project.read',
+		'artifact.create',
+		'relation.create',
+		'composite.create',
+		'composite.revise',
+		'composite.read'
+	],
+	B: [
+		'project.read',
+		'artifact.create',
+		'relation.create',
+		'composite.create',
+		'composite.revise',
+		'composite.read'
+	]
 };
 
 export function isActionAllowed(principal: Principal, action: GatewayAction): boolean {
