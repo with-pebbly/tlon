@@ -15,6 +15,8 @@ import {
 	layoutPyramid,
 	planChildRelations,
 	remapBundleIds,
+	renderStoryMarkdown,
+	storyBeats,
 	resolveExpansionParent,
 	suggestBridge
 } from '../src/index.ts';
@@ -393,3 +395,29 @@ describe('pyramid layout', () => {
 		expect(xs).toEqual([early.id, late.id]);
 	});
 });
+
+describe('story manuscript', () => {
+	it('reads bridges between the beats they reconcile and numbers every beat', () => {
+		const { graph, root } = earthMars();
+		const [left] = acceptBridge(graph, root, 'C');
+		acceptBridge(graph, left, 'D');
+		const project = bundleProject(graph);
+		const titles = storyBeats({ ...graph, project }).map((b) => b.artifact.title);
+		expect(titles).toEqual(['Born on Earth', 'D', 'C', 'Born on Mars']);
+		const md = renderStoryMarkdown({ ...graph, project }, { annotations: true });
+		expect(md).toContain('## 2. D');
+		expect(md).toContain('bridge, depth 2');
+	});
+});
+
+function bundleProject(graph: MiniGraph) {
+	const at = new Date(0).toISOString();
+	return {
+		id: graph.artifacts[0]!.projectId,
+		name: 'p',
+		domain: 'NARRATIVE' as const,
+		settings: { maxDepth: 5, maxCandidates: 3, maxNodesPerRun: 100, maxConcurrentJobs: 2 },
+		createdAt: at,
+		updatedAt: at
+	};
+}

@@ -2,7 +2,12 @@
 import { readFile, writeFile } from 'node:fs/promises';
 
 import { TlonError, LOCAL_HUMAN, type Artifact, type Project } from '@tlon/contracts';
-import { buildFractalTree, detectTensions, type FractalNode } from '@tlon/core';
+import {
+	buildFractalTree,
+	detectTensions,
+	type FractalNode,
+	renderStoryMarkdown
+} from '@tlon/core';
 import {
 	DEFAULT_DATABASE_URL,
 	createTlonService,
@@ -156,6 +161,24 @@ program
 				process.stderr.write(`exported ${bundle.artifacts.length} artifacts to ${options.out}\n`);
 			} else {
 				process.stdout.write(json);
+			}
+		})
+	);
+program
+	.command('story')
+	.argument('<projectId>')
+	.option('-o, --out <file>', 'write to a file instead of stdout')
+	.option('--annotations', 'mark authored beats vs bridges, with mechanism and assumptions')
+	.description('render the scenario as a linear Markdown manuscript')
+	.action(
+		action(async (projectId: string, options: { out?: string; annotations?: boolean }) => {
+			const graph = await withService((service) => service.getGraph(principal, projectId));
+			const markdown = renderStoryMarkdown(graph, { annotations: options.annotations === true });
+			if (options.out) {
+				await writeFile(options.out, markdown);
+				process.stderr.write(`wrote ${options.out}\n`);
+			} else {
+				process.stdout.write(markdown);
 			}
 		})
 	);

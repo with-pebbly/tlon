@@ -4,6 +4,7 @@
 	import { getWorkspace } from '$lib/state/context';
 	import { toasts } from '$lib/state/toasts.svelte';
 	import { VIEWS } from '$lib/state/workspace.svelte';
+	import { renderStoryMarkdown } from '@tlon/core';
 
 	import KindBadge from './KindBadge.svelte';
 
@@ -30,23 +31,46 @@
 		ws.focusArtifact(id);
 	}
 
+	function download(name: string, content: string, type: string) {
+		const url = URL.createObjectURL(new Blob([content], { type }));
+		const link = document.createElement('a');
+		link.href = url;
+		link.download = name;
+		link.click();
+		URL.revokeObjectURL(url);
+	}
+
+	const slug = (name: string) =>
+		name
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, '-')
+			.replace(/^-|-$/g, '') || 'project';
+
 	async function exportJson() {
 		exporting = true;
 		try {
 			const bundle = await api.exportProject(ws.projectId);
-			const slug =
-				bundle.project.name
-					.toLowerCase()
-					.replace(/[^a-z0-9]+/g, '-')
-					.replace(/^-|-$/g, '') || 'project';
-			const url = URL.createObjectURL(
-				new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' })
+			download(
+				`${slug(bundle.project.name)}.tlon.json`,
+				JSON.stringify(bundle, null, 2),
+				'application/json'
 			);
-			const link = document.createElement('a');
-			link.href = url;
-			link.download = `${slug}.tlon.json`;
-			link.click();
-			URL.revokeObjectURL(url);
+		} catch (error) {
+			toasts.error(error);
+		} finally {
+			exporting = false;
+		}
+	}
+
+	async function exportStory() {
+		exporting = true;
+		try {
+			const graph = await api.getGraph(ws.projectId);
+			download(
+				`${slug(graph.project.name)}.md`,
+				renderStoryMarkdown(graph, { annotations: true }),
+				'text/markdown'
+			);
 		} catch (error) {
 			toasts.error(error);
 		} finally {
@@ -144,6 +168,12 @@
 			>
 		{/if}
 	</button>
+	<button
+		class="btn"
+		onclick={exportStory}
+		disabled={exporting}
+		title="Linear manuscript in story order (Markdown)">Story</button
+	>
 	<button class="btn" onclick={exportJson} disabled={exporting}>Export</button>
 	<button class="btn btn-primary" onclick={() => (ws.newArtifactOpen = true)}>+ New artifact</button
 	>
