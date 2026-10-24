@@ -622,3 +622,58 @@ describe('Fact policy (owner decision: a couple of words)', () => {
 		expect(lintFactText('A key engraved twice').warnings).toEqual(['Prefer 2–3 words (now 4).']);
 	});
 });
+
+describe('Block–Fact reading order', () => {
+	it('orders the innermost continuations L′ before R′ even when R′ was written first', () => {
+		const bSeed = artifact('B seed', { creatorRole: 'B', ownerScope: 'B_PRIVATE' });
+		const bNext = artifact('B before', { creatorRole: 'B', ownerScope: 'B_PRIVATE' });
+		const aSeed = artifact('A seed', { creatorRole: 'A', ownerScope: 'A_PRIVATE' });
+		const aNext = artifact('A after', { creatorRole: 'A', ownerScope: 'A_PRIVATE' });
+		const fact = artifact('Roots keep memory', {
+			artifactClass: 'FACT',
+			factKind: 'rule',
+			ownerScope: 'C_SHARED',
+			creatorRole: 'C'
+		});
+		const at = new Date(0).toISOString();
+		const triangle = {
+			id: nextId(),
+			projectId: aSeed.projectId,
+			runId: null,
+			left: { artifactId: aSeed.id, revisionId: aSeed.headRevisionId, factAnchorId: null },
+			right: { artifactId: bSeed.id, revisionId: bSeed.headRevisionId, factAnchorId: null },
+			fact: { artifactId: fact.id, revisionId: fact.headRevisionId },
+			status: 'converged' as const,
+			stageIndex: 2,
+			depth: 1,
+			parentTriangleId: null,
+			continuations: [
+				{
+					side: 'right' as const,
+					block: { artifactId: bNext.id, revisionId: bNext.headRevisionId },
+					taskId: null
+				},
+				{
+					side: 'left' as const,
+					block: { artifactId: aNext.id, revisionId: aNext.headRevisionId },
+					taskId: null
+				}
+			],
+			createdAt: at,
+			updatedAt: at
+		};
+		const graph = {
+			artifacts: [bSeed, bNext, aSeed, aNext, fact],
+			relations: [
+				relation(aSeed.id, aNext.id, { type: 'precedes' }),
+				relation(bNext.id, bSeed.id, { type: 'precedes' })
+			],
+			expansions: [],
+			triangles: [triangle]
+		};
+		const titles = storyBeats({ ...graph, project: bundleProject(graph as MiniGraph) }).map(
+			(s) => s.artifact.title
+		);
+		expect(titles).toEqual(['A seed', 'A after', 'B before', 'B seed']);
+	});
+});

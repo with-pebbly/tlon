@@ -205,7 +205,7 @@ export const FactReviewPolicy = z.enum(['facilitator', 'mediator']);
 export const RunConfig = z.object({
 	participantMode: z.enum(['human_only', 'ai_only', 'mixed']).default('human_only'),
 	factReview: FactReviewPolicy.default('facilitator'),
-	maxDepth: z.int().min(1).max(10).default(3),
+	maxDepth: z.int().min(1).max(16).default(3),
 	maxCandidates: z.int().min(1).max(5).default(3),
 	/** Automatically open the next task when its inputs are ready (§3.3). */
 	autoSchedule: z.boolean().default(true)

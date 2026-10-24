@@ -212,6 +212,20 @@ export function layoutPyramid(graph: GraphLike): PyramidLayout {
 			endpoints(r.toId, 'to').map((toId) => ({ ...r, fromId, toId }))
 		)
 	);
+	// A Triangle orders its anchors (left before right) and, with the default forward /
+	// backward advance, its continuations: L → L′ → R′ → R. Without these the two sides'
+	// chains are unrelated and the innermost continuations would fall back to creation order.
+	for (const t of graph.triangles ?? []) {
+		if (t.status === 'rejected' || t.status === 'superseded') continue;
+		const synthetic = { expansionId: null, status: 'ACCEPTED', type: 'precedes' } as const;
+		orderEdges.push({ ...synthetic, fromId: t.left.artifactId, toId: t.right.artifactId });
+		const left = t.continuations.find((c) => c.side === 'left')?.block.artifactId;
+		const right = t.continuations.find((c) => c.side === 'right')?.block.artifactId;
+		const advance = t.advance ?? { left: 'forward', right: 'backward' };
+		if (left && right && advance.left === 'forward' && advance.right === 'backward') {
+			orderEdges.push({ ...synthetic, fromId: left, toId: right });
+		}
+	}
 	const ordered = orderBase(base, orderEdges);
 	const baseIndex = new Map(ordered.map((a, i) => [a.id, i]));
 	const indexOf = (id: string, side: 'left' | 'right') => {

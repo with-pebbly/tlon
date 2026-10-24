@@ -1,12 +1,17 @@
 # Tlön
 
-Recursively expandable graph of structured artifacts. Two artifacts that disagree are
-not overwritten: a **bridge** artifact C explains how both can hold, and the new
-intervals A→C and C→B can be bridged again. Design: [ARCHITECTURE.md](ARCHITECTURE.md)
-(written as "Fractal Narrative Engine"; Tlön is the product name).
-This repository implements milestones **M0–M2** (artifacts, relations, revisions,
-manual recursive bridging, graph/fractal/timeline views, export/import). No LLM keys,
-agents or MCP are involved yet.
+A participant-agnostic **Block–Fact** protocol for distributed creative collaboration
+(design: [docs/BLOCK_FACT_ARCHITECTURE_PART_1.md](docs/BLOCK_FACT_ARCHITECTURE_PART_1.md),
+[PART_2](docs/BLOCK_FACT_ARCHITECTURE_PART_2.md); mapping onto this codebase:
+[ADR 0011](docs/adr/0011-block-fact-model.md), [ADR 0012](docs/adr/0012-participants-and-tasks.md)).
+Participant **A** writes Blocks from one brief, **B** from another; neither ever sees the
+other's Blocks. Mediator **C** sees both and publishes a **Fact** — a bare circumstance in
+a couple of words («Корни хранят память», not «В корнях обнаружена неизвестная система
+хранения памяти»). Each side continues locally from its own Block and that Fact; the
+two continuations become the next gap. Any Triangle can be composed into a Block and
+linked again with the same mechanism. Humans, AI agents and scripts take the same tasks
+through the same API. The earlier full-scene "bridge" model ([ARCHITECTURE.md](ARCHITECTURE.md))
+remains for old projects; its bridges are ordinary Blocks.
 
 ## Layout
 
@@ -74,7 +79,31 @@ pnpm db:generate   # drizzle-kit → packages/store/migrations/*.sql (commit the
 pnpm db:migrate
 ```
 
-## Primary flow
+## Protocol flow (humans, no LLM)
+
+1. Open a project → **Protocol** → create participants A, B and C (human, AI or
+   scripted). Each gets a link `http://localhost:5173/p#<token>`, shown once; send it to
+   that person. There is no login: the link is the identity, kept in that browser tab only.
+2. **Start a run** with two private briefs (A's and B's) and who accepts Facts
+   (facilitator by default, or C itself).
+3. A and B each see only their brief and write a seed Block. C then sees both Blocks and
+   proposes up to 3 Facts (2–3 words, at most 4; the editor blocks longer ones). The
+   facilitator accepts one; only that Fact is disclosed to A and B.
+4. A writes what happens after its Block, B what happened before its Block. The triangle
+   converges; **Open child gap** joins the two continuations for the next Fact.
+5. **Compose…** turns a triangle into a composite Block that can be connected to any other
+   Block (shift-select two nodes in the Graph → **Propose connecting Fact**).
+6. Facts are drawn as yellow apexes over their two Blocks; stage numbers are generation
+   waves, not story time. **Story** exports the Blocks in reading order with the Facts
+   listed separately.
+
+AI participants use the same task API: `pnpm agents --start "…" --end "…" [--target 24]
+[--max-depth 11] [--review] [--out story.md]` creates the project, AI participants and a
+run, executes every task in an isolated session that sees only its task view, checks
+isolation and writes the story. `--review` stops after C's first candidates so a human
+facilitator chooses. The previous full-scene bridge runner is `pnpm agents:legacy`.
+
+## Primary flow (legacy bridges)
 
 1. Create a project (Narrative or Generic) or open the seeded _Earth / Mars_ project.
 2. Add artifacts A and B; drag from A to B to create a relation (e.g. `contradicts`).

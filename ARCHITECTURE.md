@@ -1,6 +1,6 @@
 # Fractal Narrative Engine — Architecture & Implementation Blueprint
 
-> **Status:** Draft v0.1 · **Audience:** Claude Code and contributors · **Goal:** Start implementing a web-based structured-artifact engine today, while preserving a secure migration path to isolated multi-agent authoring.
+> **Status:** Superseded for new work by the Block–Fact protocol (docs/BLOCK_FACT_ARCHITECTURE_PART_1.md, ADR 0011, ADR 0012). Kept as the design of the legacy full-scene bridge model, which remains supported for existing projects.
 
 ## 0. Executive summary
 

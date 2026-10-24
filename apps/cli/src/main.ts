@@ -172,8 +172,16 @@ program
 	.description('render the scenario as a linear Markdown manuscript')
 	.action(
 		action(async (projectId: string, options: { out?: string; annotations?: boolean }) => {
-			const graph = await withService((service) => service.getGraph(principal, projectId));
-			const markdown = renderStoryMarkdown(graph, { annotations: options.annotations === true });
+			const [graph, protocol] = await withService((service) =>
+				Promise.all([
+					service.getGraph(principal, projectId),
+					service.getProtocol(principal, projectId)
+				])
+			);
+			const markdown = renderStoryMarkdown(
+				{ ...graph, triangles: protocol.triangles },
+				{ annotations: options.annotations === true }
+			);
 			if (options.out) {
 				await writeFile(options.out, markdown);
 				process.stderr.write(`wrote ${options.out}\n`);

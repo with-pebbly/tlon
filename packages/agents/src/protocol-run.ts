@@ -15,7 +15,7 @@
  * shallowest first, until `--target` Blocks or `--max-depth`.
  *
  * Usage: bun packages/agents/src/protocol-run.ts --start "An old man plants a tree." \
- *          --end "The universe collapses." [--target 24] [--max-depth 3] [--title "..."]
+ *          --end "The universe collapses." [--target 24] [--max-depth 11] [--title "..."]
  *          [--out ~/Desktop/story.md] [--review]
  */
 import { randomUUID } from 'node:crypto';
@@ -59,7 +59,7 @@ const { values } = parseArgs({
 		end: { type: 'string' },
 		title: { type: 'string' },
 		target: { type: 'string', default: '24' },
-		'max-depth': { type: 'string', default: '3' },
+		'max-depth': { type: 'string', default: '11' },
 		out: { type: 'string' },
 		review: { type: 'boolean', default: false },
 		api: { type: 'string', default: process.env.TLON_API_URL ?? 'http://127.0.0.1:3001' }
@@ -337,7 +337,8 @@ async function execute(role: 'A' | 'B' | 'C', task: Task): Promise<void> {
 	} finally {
 		await session.dispose();
 	}
-	console.log(`  [${role}] ${view.type} (stage ${task.stageIndex}) done`);
+	// A/B task views carry scrubbed stage/depth (ADR 0012), so only C's stage is real.
+	console.log(`  [${role}] ${view.type}${role === 'C' ? ` (stage ${task.stageIndex})` : ''} done`);
 }
 
 /** Runs every pending task of every participant, in parallel across roles. */
@@ -375,36 +376,31 @@ for (let round = 1; ; round++) {
 	const protocol = await call('GET', `${P}/protocol`, ProtocolState);
 	const beats = storyBeats({ ...graph, triangles: protocol.triangles });
 	if (beats.length >= target || values.review) break;
-	// Open a gap between every pair of neighbouring Blocks not yet joined by a triangle,
-	// shallowest parents first; the parent is the triangle that produced the later Block.
-	const producedBy = new Map<string, (typeof protocol.triangles)[number]>();
-	for (const t of protocol.triangles)
-		for (const c of t.continuations) producedBy.set(c.block.artifactId, t);
-	const joined = new Set(
-		protocol.triangles.map((t) => `${t.left.artifactId}|${t.right.artifactId}`)
-	);
-	const gaps = beats
-		.slice(1)
-		.map((b, i) => ({ left: beats[i]!.artifact, right: b.artifact }))
-		.filter((g) => !joined.has(`${g.left.id}|${g.right.id}`))
-		.map((g) => {
-			const parent = producedBy.get(g.right.id) ?? producedBy.get(g.left.id) ?? null;
-			return { ...g, parent, depth: (parent?.depth ?? 0) + 1 };
+	// BLOCK_FACT §1.3: the next gap of a converged Triangle lies between its two new
+	// continuations (A′ forward from A, B′ backward from B), one level deeper. Gaps are
+	// never opened between two Blocks of the same side: that side wrote them in sequence.
+	const parents = new Set(protocol.triangles.map((t) => t.parentTriangleId));
+	const chosen = protocol.triangles
+		.filter((t) => t.status === 'converged' && !parents.has(t.id) && t.depth < maxDepth)
+		.flatMap((t) => {
+			const left = t.continuations.find((c) => c.side === 'left');
+			const right = t.continuations.find((c) => c.side === 'right');
+			return left && right
+				? [{ left: left.block.artifactId, right: right.block.artifactId, parent: t }]
+				: [];
 		})
-		.filter((g) => g.depth <= maxDepth)
-		.toSorted((a, b) => a.depth - b.depth);
-	const budget = Math.ceil((target - beats.length) / 2);
-	const chosen = gaps.slice(0, Math.max(1, budget));
+		.toSorted((a, b) => a.parent.depth - b.parent.depth)
+		.slice(0, Math.max(1, Math.ceil((target - beats.length) / 2)));
 	if (chosen.length === 0) {
-		console.log(`\nno open gaps within max depth ${maxDepth}; stopping`);
+		console.log(`\nno converged gap left within max depth ${maxDepth}; stopping`);
 		break;
 	}
 	console.log(`\n── round ${round}: ${beats.length} Blocks, opening ${chosen.length} gap(s) ──`);
 	for (const g of chosen) {
 		await call('POST', `${P}/connect`, TriangleDetail, {
-			left: { artifactId: g.left.id },
-			right: { artifactId: g.right.id },
-			...(g.parent ? { parentTriangleId: g.parent.id } : {}),
+			left: { artifactId: g.left },
+			right: { artifactId: g.right },
+			parentTriangleId: g.parent.id,
 			runId: run.id
 		});
 	}
@@ -421,12 +417,15 @@ const viewsA = deliveredViews.A.join('\n');
 const viewsB = deliveredViews.B.join('\n');
 if (viewsA.includes(values.end)) failures.push('a task view for A contained brief B');
 if (viewsB.includes(values.start)) failures.push('a task view for B contained brief A');
+// Ids and prose bodies, not titles: a writer may legitimately title a Block after the
+// disclosed Fact, so the same two words can appear on both sides.
+const leaked = (views: string, b: (typeof graph.artifacts)[number]) =>
+	views.includes(b.id) ||
+	(b.body.length >= 40 && views.includes(JSON.stringify(b.body).slice(1, 61)));
 for (const b of own('B_PRIVATE'))
-	if (viewsA.includes(b.id) || viewsA.includes(b.title))
-		failures.push(`A received B block ${b.id}`);
+	if (leaked(viewsA, b)) failures.push(`A received B block ${b.id}`);
 for (const a of own('A_PRIVATE'))
-	if (viewsB.includes(a.id) || viewsB.includes(a.title))
-		failures.push(`B received A block ${a.id}`);
+	if (leaked(viewsB, a)) failures.push(`B received A block ${a.id}`);
 for (const [viewer, hidden] of [
 	['A', own('B_PRIVATE')],
 	['B', own('A_PRIVATE')]

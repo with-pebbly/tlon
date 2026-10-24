@@ -272,7 +272,7 @@
 								class="input w-20"
 								type="number"
 								min="1"
-								max="10"
+								max="16"
 								bind:value={maxDepth}
 							/>
 						</div>
