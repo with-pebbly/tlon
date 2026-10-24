@@ -2,7 +2,6 @@
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { api } from '$lib/api';
-	import LogoutButton from '$lib/components/LogoutButton.svelte';
 	import { toasts } from '$lib/state/toasts.svelte';
 	import { formatTime } from '$lib/ui';
 	import { PROJECT_DOMAINS, type Project, type ProjectDomain } from '@tlon/contracts';
@@ -81,7 +80,6 @@
 			<h1 class="text-xl font-semibold tracking-tight text-zinc-900">Tlön</h1>
 			<p class="text-zinc-500">Artifacts, relations and recursive bridges.</p>
 		</div>
-		<LogoutButton class="btn-sm" />
 	</header>
 
 	<div class="grid gap-6 md:grid-cols-[1fr_320px]">

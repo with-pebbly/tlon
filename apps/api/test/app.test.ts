@@ -16,13 +16,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { buildApp } from '../src/app.ts';
 
-const ADMIN = 'tlon_admin_test_token_0123456789abcdefghij';
-const AUTH = { authorization: `Bearer ${ADMIN}` };
 let t: TestService;
 let app: FastifyInstance;
 beforeEach(async () => {
 	t = await createTestService();
-	app = buildApp({ service: t.service, adminToken: ADMIN });
+	app = buildApp({ service: t.service });
 });
 afterEach(async () => {
 	await app.close();
@@ -39,7 +37,7 @@ async function api<T>(
 		method,
 		url: `/api${url}`,
 		payload: body as object | undefined,
-		headers: { ...AUTH, ...headers }
+		headers
 	});
 	return { status: res.statusCode, body: res.json() as T, headers: res.headers };
 }
@@ -89,7 +87,7 @@ describe('HTTP mapping', () => {
 		const malformed = await app.inject({
 			method: 'POST',
 			url: '/api/projects',
-			headers: { ...AUTH, 'content-type': 'application/json' },
+			headers: { 'content-type': 'application/json' },
 			payload: '{"name":'
 		});
 		expect(malformed.statusCode).toBe(400);
@@ -196,8 +194,7 @@ describe('HTTP mapping', () => {
 		});
 		const res = await app.inject({
 			method: 'POST',
-			url: `/api${base}/expansions/${opened.body.expansion.id}/reject`,
-			headers: AUTH
+			url: `/api${base}/expansions/${opened.body.expansion.id}/reject`
 		});
 		expect(res.statusCode).toBe(200);
 		expect(res.json().expansion.status).toBe('CANCELLED');
@@ -205,11 +202,7 @@ describe('HTTP mapping', () => {
 
 	it('exports and imports over HTTP', async () => {
 		const { project } = await setup();
-		const exported = await app.inject({
-			method: 'GET',
-			url: `/api/projects/${project.id}/export`,
-			headers: AUTH
-		});
+		const exported = await app.inject({ method: 'GET', url: `/api/projects/${project.id}/export` });
 		expect(exported.statusCode).toBe(200);
 		expect(exported.headers['content-disposition']).toBe('attachment; filename="http.tlon.json"');
 		const bundle = exported.json();
@@ -236,7 +229,7 @@ describe('import as new project', () => {
 	it('POST /projects/import returns 201 and lists the project', async () => {
 		const { project } = await setup();
 		const bundle = (
-			await app.inject({ method: 'GET', url: `/api/projects/${project.id}/export`, headers: AUTH })
+			await app.inject({ method: 'GET', url: `/api/projects/${project.id}/export` })
 		).json();
 		const res = await api<{ projectId: string }>(
 			'POST',
@@ -259,11 +252,10 @@ describe('restart', () => {
 			try {
 				const first = await openDatabase(url);
 				await migrateDatabase(first);
-				const app1 = buildApp({ service: createTlonService(first.db), adminToken: ADMIN });
+				const app1 = buildApp({ service: createTlonService(first.db) });
 				const created = await app1.inject({
 					method: 'POST',
 					url: '/api/projects',
-					headers: AUTH,
 					payload: { name: 'durable' }
 				});
 				expect(created.statusCode).toBe(201);
@@ -272,8 +264,8 @@ describe('restart', () => {
 
 				const second = await openDatabase(url);
 				await migrateDatabase(second);
-				const app2 = buildApp({ service: createTlonService(second.db), adminToken: ADMIN });
-				const listed = await app2.inject({ method: 'GET', url: '/api/projects', headers: AUTH });
+				const app2 = buildApp({ service: createTlonService(second.db) });
+				const listed = await app2.inject({ method: 'GET', url: '/api/projects' });
 				expect(listed.json().items.map((p: Project) => p.name)).toEqual(['durable']);
 				await app2.close();
 				await second.close();

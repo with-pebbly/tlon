@@ -1,7 +1,5 @@
 import {
 	API_PREFIX,
-	CSRF_HEADER,
-	CreateSessionInput,
 	TlonError,
 	IDEMPOTENCY_KEY_HEADER,
 	IF_MATCH_HEADER,
@@ -12,25 +10,11 @@ import {
 import type { TlonService } from '@tlon/store';
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyRequest } from 'fastify';
 
-import {
-	SESSION_COOKIE,
-	SessionStore,
-	assertAdminToken,
-	clearedSessionCookie,
-	readCookie,
-	secretsEqual,
-	sessionCookie
-} from './auth.ts';
-
 /** Structural stand-in for pino's DestinationStream (pino is not a direct dependency). */
 export type LogStream = { write(message: string): void };
 
 export type BuildAppOptions = {
 	service: TlonService;
-	/** Human credential (≥ 32 chars). Required: there is no address-based trust. */
-	adminToken: string;
-	/** Clock for session expiry (tests). */
-	now?: () => number;
 	/**
 	 * `true` enables info-level logging; objects are passed to pino (`stream` redirects the
 	 * output, e.g. to capture logs in tests). Request bodies, headers and query strings are never logged.
@@ -41,21 +25,24 @@ export type BuildAppOptions = {
 /** Matches the 20 MB import limit in the API spec. */
 const BODY_LIMIT_BYTES = 20 * 1024 * 1024;
 
-const BEARER = /^Bearer[ \t]+(\S+)$/i;
-const SAFE_METHODS: readonly string[] = ['GET', 'HEAD', 'OPTIONS'];
+/** Only the TCP peer counts: `X-Forwarded-For` and friends are attacker-controlled and ignored. */
+const LOOPBACK_ADDRESSES: readonly string[] = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
 
-export type Credentials = { adminToken: string; sessions: SessionStore };
+export function isLoopbackAddress(address: string | undefined): boolean {
+	return address !== undefined && LOOPBACK_ADDRESSES.includes(address);
+}
+
+const BEARER = /^Bearer[ \t]+(\S+)$/i;
 
 /**
- * The single place a request becomes a principal (spec §1). Remote address plays no role.
- * If `Authorization` is present it must be the admin token (→ HUMAN) or a valid agent token;
- * anything else is UNAUTHENTICATED and never falls through to the cookie. Without the header,
- * a valid `tlon_session` cookie yields HUMAN; cookie-authenticated mutations must carry the
- * CSRF header. Nothing in the body or query can influence who is acting.
+ * The single place a request becomes a principal (spec §1). `Authorization: Bearer tlon_…`
+ * is resolved through the service (unexpired, unrevoked, principal enabled); a present but
+ * unusable credential is UNAUTHENTICATED and never falls back to the human. Without the
+ * header the implicit local human applies only to loopback TCP peers. Nothing in the body,
+ * query or other headers can influence who is acting.
  */
 export async function resolvePrincipal(
 	service: TlonService,
-	credentials: Credentials,
 	request: FastifyRequest
 ): Promise<Principal> {
 	const header = request.headers.authorization;
@@ -65,16 +52,9 @@ export async function resolvePrincipal(
 			await service.recordUnauthenticated('malformed_credentials');
 			throw new TlonError('UNAUTHENTICATED', 'invalid or expired credentials');
 		}
-		if (secretsEqual(token, credentials.adminToken)) return LOCAL_HUMAN;
 		return service.authenticateToken(token);
 	}
-	const sessionId = readCookie(request.headers.cookie, SESSION_COOKIE);
-	if (sessionId !== undefined && credentials.sessions.isValid(sessionId)) {
-		if (!SAFE_METHODS.includes(request.method) && request.headers[CSRF_HEADER] !== '1') {
-			throw new TlonError('FORBIDDEN', `cookie-authenticated mutations require ${CSRF_HEADER}: 1`);
-		}
-		return LOCAL_HUMAN;
-	}
+	if (isLoopbackAddress(request.socket.remoteAddress)) return LOCAL_HUMAN;
 	await service.recordUnauthenticated('no_credentials');
 	throw new TlonError('UNAUTHENTICATED', 'authentication required');
 }
@@ -122,16 +102,9 @@ type AgentParams = { Params: { projectId: string; principalId: string } };
 type TokenParams = { Params: { projectId: string; principalId: string; tokenId: string } };
 type GrantParams = { Params: { projectId: string; grantId: string } };
 
-export function buildApp({
-	service,
-	adminToken,
-	now = Date.now,
-	logger
-}: BuildAppOptions): FastifyInstance {
-	assertAdminToken(adminToken, 'adminToken');
+export function buildApp({ service, logger }: BuildAppOptions): FastifyInstance {
 	const app = Fastify({ logger: loggerConfig(logger), bodyLimit: BODY_LIMIT_BYTES });
-	const credentials: Credentials = { adminToken, sessions: new SessionStore(now) };
-	const act = (request: FastifyRequest) => resolvePrincipal(service, credentials, request);
+	const act = (request: FastifyRequest) => resolvePrincipal(service, request);
 
 	// Empty bodies are valid (e.g. cancelling an expansion); malformed JSON is a typed validation error.
 	app.addContentTypeParser('application/json', { parseAs: 'string' }, (_request, body, done) => {
@@ -180,23 +153,6 @@ export function buildApp({
 	const project = `${prefix}/projects/:projectId`;
 
 	app.get(`${prefix}/health`, async () => ({ ok: true }));
-
-	app.post(`${prefix}/session`, async (request, reply) => {
-		const { token } = CreateSessionInput.parse(request.body);
-		if (!secretsEqual(token, credentials.adminToken)) {
-			await service.recordUnauthenticated('bad_session_login');
-			throw new TlonError('UNAUTHENTICATED', 'invalid credentials');
-		}
-		return reply
-			.code(204)
-			.header('set-cookie', sessionCookie(credentials.sessions.create()))
-			.send();
-	});
-	app.delete(`${prefix}/session`, async (request, reply) => {
-		const sessionId = readCookie(request.headers.cookie, SESSION_COOKIE);
-		if (sessionId !== undefined) credentials.sessions.delete(sessionId);
-		return reply.code(204).header('set-cookie', clearedSessionCookie()).send();
-	});
 
 	app.get(`${prefix}/projects`, async (request) => service.listProjects(await act(request)));
 	app.post(`${prefix}/projects`, async (request, reply) => {

@@ -47,23 +47,6 @@ commands while the API is stopped).
 
 Stop the local cluster with `pnpm db:stop`.
 
-### Human login (admin token)
-
-All `/api` routes except `GET /api/health` and `POST /api/session` need a credential; there
-is no loopback shortcut (agent processes run on the same machine). The human credential is
-the admin secret: set `TLON_ADMIN_TOKEN` (≥ 32 chars) in `.env`, or leave it unset and the API
-generates `tlon_admin_…` on first boot into `.data/admin-token` (mode 0600; only the path is
-logged). Use it as `Authorization: Bearer $(cat .data/admin-token)`, or log in for a cookie:
-
-```sh
-curl -c jar -H 'content-type: application/json' \
-  -d "{\"token\":\"$(cat .data/admin-token)\"}" http://127.0.0.1:3001/api/session
-curl -b jar http://127.0.0.1:3001/api/whoami          # GET works with the cookie alone
-curl -b jar -H 'x-tlon-csrf: 1' -X POST ...           # cookie mutations need the CSRF header
-```
-
-Sessions last 12 h and live in API memory (a restart invalidates them).
-
 ## CLI
 
 ```sh
