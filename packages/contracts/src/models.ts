@@ -4,7 +4,9 @@ import {
 	ArtifactKind,
 	ArtifactStatus,
 	CandidateReviewStatus,
+	ArtifactClass,
 	Composition,
+	FactKind,
 	ExpansionStatus,
 	OwnerScope,
 	ProjectDomain,
@@ -47,6 +49,13 @@ export const Artifact = z.object({
 	kind: ArtifactKind,
 	/** ATOMIC unless the artifact is a composite (default keeps v1 bundles importable). */
 	composition: Composition.default('ATOMIC'),
+	/**
+	 * BLOCK = a narrative point/segment (atomic or composite; legacy full-scene bridges
+	 * are Blocks). FACT = a minimal, open connector authored by the mediator C
+	 * (BLOCK_FACT §0.1/§4.1): its whole shareable content is `title` (≤ 160 chars).
+	 */
+	artifactClass: ArtifactClass.default('BLOCK'),
+	factKind: FactKind.nullable().default(null),
 	title: z.string(),
 	body: z.string(),
 	structured: StructuredRecord,
@@ -66,6 +75,8 @@ export type Artifact = z.infer<typeof Artifact>;
 export const ArtifactSnapshot = z.object({
 	kind: ArtifactKind,
 	composition: Composition.default('ATOMIC'),
+	artifactClass: ArtifactClass.default('BLOCK'),
+	factKind: FactKind.nullable().default(null),
 	title: z.string(),
 	body: z.string(),
 	structured: StructuredRecord,

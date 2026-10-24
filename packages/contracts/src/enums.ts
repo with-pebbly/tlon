@@ -40,6 +40,31 @@ export const COMPOSITIONS = ['ATOMIC', 'COMPOSITE'] as const;
 export const Composition = z.enum(COMPOSITIONS);
 export type Composition = z.infer<typeof Composition>;
 
+/** BLOCK (narrative point/segment) vs FACT (minimal mediator connector), BLOCK_FACT §1.1. */
+export const ARTIFACT_CLASSES = ['BLOCK', 'FACT'] as const;
+export const ArtifactClass = z.enum(ARTIFACT_CLASSES);
+export type ArtifactClass = z.infer<typeof ArtifactClass>;
+
+/** What a Fact is (BLOCK_FACT §4). */
+export const FACT_KINDS = [
+	'object',
+	'person',
+	'place',
+	'rule',
+	'signal',
+	'trace',
+	'document',
+	'need',
+	'constraint',
+	'belief',
+	'damage',
+	'resource',
+	'relationship',
+	'other'
+] as const;
+export const FactKind = z.enum(FACT_KINDS);
+export type FactKind = z.infer<typeof FactKind>;
+
 export const OWNER_SCOPES = ['A_PRIVATE', 'B_PRIVATE', 'C_SHARED', 'PROJECT_PUBLIC'] as const;
 export const OwnerScope = z.enum(OWNER_SCOPES);
 export type OwnerScope = z.infer<typeof OwnerScope>;
@@ -111,7 +136,10 @@ export const WELL_KNOWN_RELATION_TYPES = [
 	'same_identity_as',
 	'believed_by',
 	'derived_from',
-	'bridges'
+	'bridges',
+	/** Block ↔ Fact association inside a Triangle (BLOCK_FACT §4 SemanticRelation). */
+	'has_fact',
+	'involves'
 ] as const;
 
 /** Relation types whose accepted/proposed edges must stay acyclic (chronology, derivation). */

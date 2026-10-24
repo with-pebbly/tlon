@@ -11,20 +11,31 @@ export const AGENT_ROLES = ['A', 'B', 'C', 'VALIDATOR'] as const;
 export const AgentRole = z.enum(AGENT_ROLES);
 export type AgentRole = z.infer<typeof AgentRole>;
 
-/** Bearer scheme prefix for agent tokens: `Authorization: Bearer tlon_<secret>`. */
+/** Bearer scheme prefix for participant tokens: `Authorization: Bearer tlon_<secret>`. */
 export const AGENT_TOKEN_PREFIX = 'tlon_';
 export const DEFAULT_AGENT_TOKEN_TTL_SECONDS = 60 * 60;
-export const MAX_AGENT_TOKEN_TTL_SECONDS = 24 * 60 * 60;
+/** Up to a week: a human workshop session link must survive a day of writing. */
+export const MAX_AGENT_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 /**
- * Agent principal: one per (project, role, name). Identity is bound to a project;
- * its role comes from this record, never from request parameters (§7.2).
+ * Who executes a participant's tasks (BLOCK_FACT §19). The protocol is identical for
+ * all three; the executor kind is recorded for analysis, never used for permissions.
+ */
+export const EXECUTOR_KINDS = ['human', 'ai', 'scripted'] as const;
+export const ExecutorKind = z.enum(EXECUTOR_KINDS);
+export type ExecutorKind = z.infer<typeof ExecutorKind>;
+
+/**
+ * Participant principal (historically "agent principal"): one per (project, role,
+ * name), bound to one project; its role comes from this record, never from request
+ * parameters. Humans and AI executors are the same kind of principal.
  */
 export const AgentPrincipal = z.object({
 	id: Uuid,
 	projectId: Uuid,
 	role: AgentRole,
 	name: z.string(),
+	executorKind: ExecutorKind.default('ai'),
 	createdAt: IsoDate,
 	disabledAt: IsoDate.nullable()
 });
@@ -32,7 +43,8 @@ export type AgentPrincipal = z.infer<typeof AgentPrincipal>;
 
 export const CreateAgentInput = z.object({
 	role: AgentRole,
-	name: z.string().trim().min(1).max(100)
+	name: z.string().trim().min(1).max(100),
+	executorKind: ExecutorKind.default('ai')
 });
 export type CreateAgentInput = z.input<typeof CreateAgentInput>;
 

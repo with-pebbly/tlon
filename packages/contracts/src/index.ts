@@ -6,3 +6,4 @@ export * from './structured.ts';
 export * from './gateway.ts';
 export * from './composites.ts';
 export * from './validation.ts';
+export * from './protocol.ts';
