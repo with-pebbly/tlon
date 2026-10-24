@@ -48,8 +48,10 @@ import {
 	type ProjectGraph,
 	ProjectGraph as ProjectGraphSchema,
 	type Relation,
+	Transition,
 	TransitionAnnotation
 } from '../../contracts/src/index.ts';
+import { storyBeats } from '../../core/src/index.ts';
 import { type BeatForExtraction, extractTransitions, vocabularyOf } from './extraction.ts';
 import { GatewayClient, toolsForRole } from './gateway-tools.ts';
 import { ROLE_PROMPTS } from './prompts.ts';
@@ -199,8 +201,8 @@ async function runAgent(agent: Agent, projectId: string, prompt: string): Promis
 
 const graphOf = (projectId: string) =>
 	operator('GET', `/projects/${projectId}/graph`, ProjectGraphSchema);
-const blocks = (g: ProjectGraph) =>
-	g.artifacts.filter((a) => a.status !== 'REJECTED' && a.status !== 'SUPERSEDED').length;
+/** Story beats: authored + accepted, excluding open candidates, disclosure notes and composites. */
+const blocks = (g: ProjectGraph) => storyBeats(g).length;
 
 type Interval = { relation: Relation; depth: number; minDepth: number; tree: 'seam' | 'chain' };
 
@@ -329,11 +331,15 @@ async function verifyCandidates(projectId: string): Promise<void> {
 		chunk: 3
 	});
 	for (const p of pending) {
-		const t = proposals.get(p.artifactId);
-		if (!t) {
+		const raw = proposals.get(p.artifactId);
+		// Malformed extractor output (bad key/event syntax) must not crash the run: the
+		// candidate stays judged on C's own contract and is reported as unverified.
+		const parsed = raw ? Transition.safeParse(raw) : undefined;
+		if (!parsed?.success) {
 			unverified.add(p.artifactId);
 			continue;
 		}
+		const t = parsed.data;
 		await operator(
 			'PUT',
 			`/projects/${projectId}/artifacts/${p.artifactId}/transition`,
