@@ -21,6 +21,7 @@ import {
 	assertCandidateArtifactAllowed,
 	assertDepthWithinLimit,
 	planChildRelations,
+	creationScopeFor,
 	resolveExpansionParent
 } from '@tlon/core';
 import { and, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
@@ -70,7 +71,7 @@ async function rejectCandidateArtifact(
 	artifactId: string,
 	reason: string
 ): Promise<void> {
-	const current = await getArtifactRow(q, principal, projectId, artifactId);
+	const current = await getArtifactRow(ctx, q, principal, projectId, artifactId);
 	if (current.row.status !== 'PROPOSED' || current.row.locked) return;
 	await appendRevision(ctx, q, principal, current, { status: 'REJECTED' }, reason);
 }
@@ -90,12 +91,19 @@ export function expansionMethods(ctx: Ctx) {
 			throw new TlonError('INTERNAL', 'accepted expansion has no selected bridge');
 		}
 		const [bridge] = await selectArtifacts(
+			ctx,
 			q,
 			principal,
 			projectId,
 			eq(artifacts.id, expansion.selectedBridgeArtifactId)
 		);
-		const children = await loadRelations(q, projectId, eq(relations.expansionId, expansionId));
+		const children = await loadRelations(
+			ctx,
+			q,
+			principal,
+			projectId,
+			eq(relations.expansionId, expansionId)
+		);
 		const ordered = expansion.childRelationIds.flatMap((id) => children.filter((c) => c.id === id));
 		const [first, second] = ordered;
 		if (!bridge || !first || !second) {
@@ -113,9 +121,9 @@ export function expansionMethods(ctx: Ctx) {
 			projectId: string,
 			input: unknown
 		): Promise<ExpansionDetail> {
-			const data = parseInput(CreateExpansionInput, input);
 			return db.transaction(async (tx) => {
-				const project = await authorize(tx, principal, projectId, 'write');
+				const project = await authorize(tx, principal, projectId, 'expansion.open');
+				const data = parseInput(CreateExpansionInput, input);
 				let leftId: string;
 				let rightId: string;
 				let target: typeof relations.$inferSelect | null = null;
@@ -152,7 +160,7 @@ export function expansionMethods(ctx: Ctx) {
 					leftId = data.leftArtifactId as string;
 					rightId = data.rightArtifactId as string;
 				}
-				await assertEndpointsInProject(tx, principal, projectId, [leftId, rightId]);
+				await assertEndpointsInProject(ctx, tx, principal, projectId, [leftId, rightId]);
 				if (leftId === rightId) {
 					throw new TlonError('SELF_RELATION', 'an expansion needs two different anchors', {
 						artifactId: leftId
@@ -238,7 +246,7 @@ export function expansionMethods(ctx: Ctx) {
 					targetRelationId: target?.id ?? null,
 					depth
 				});
-				return loadExpansionDetail(tx, principal, projectId, id);
+				return loadExpansionDetail(ctx, tx, principal, projectId, id);
 			});
 		},
 
@@ -247,9 +255,9 @@ export function expansionMethods(ctx: Ctx) {
 			projectId: string,
 			id: string
 		): Promise<ExpansionDetail> {
-			await authorize(db, principal, projectId, 'read');
+			await authorize(db, principal, projectId, 'expansion.read');
 			asUuid(id, 'EXPANSION_NOT_FOUND');
-			return loadExpansionDetail(db, principal, projectId, id);
+			return loadExpansionDetail(ctx, db, principal, projectId, id);
 		},
 
 		async submitCandidate(
@@ -258,9 +266,9 @@ export function expansionMethods(ctx: Ctx) {
 			expansionId: string,
 			input: unknown
 		): Promise<ExpansionDetail> {
-			const data = parseInput(SubmitCandidateInput, input);
 			return db.transaction(async (tx) => {
-				const project = await authorize(tx, principal, projectId, 'write');
+				const project = await authorize(tx, principal, projectId, 'expansion.submit_candidate');
+				const data = parseInput(SubmitCandidateInput, input);
 				const expansion = await lockExpansion(tx, projectId, expansionId);
 				if (!OPEN.includes(expansion.status)) {
 					throw new TlonError('INVALID_STATE', 'expansion no longer accepts candidates', {
@@ -292,7 +300,7 @@ export function expansionMethods(ctx: Ctx) {
 				let artifactId: string;
 				if ('existingArtifactId' in data) {
 					asUuid(data.existingArtifactId, 'ARTIFACT_NOT_FOUND');
-					await assertEndpointsInProject(tx, principal, projectId, [data.existingArtifactId]);
+					await assertEndpointsInProject(ctx, tx, principal, projectId, [data.existingArtifactId]);
 					const lineage = await loadLineage(tx, projectId, expansion.parentExpansionId);
 					assertCandidateArtifactAllowed(data.existingArtifactId, expansion, lineage);
 					const [dup] = await tx
@@ -319,7 +327,11 @@ export function expansionMethods(ctx: Ctx) {
 						const bridge = BridgeStructured.parse(data.artifact.structured);
 						return project.domain === 'NARRATIVE' ? NarrativeStructured.parse(bridge) : bridge;
 					});
-					// M0–M2 has no private scopes: candidates are PROJECT_PUBLIC (M3 introduces C_SHARED).
+					// Candidates a C agent creates are C_SHARED (forced); human-authored ones stay PROJECT_PUBLIC.
+					const ownerScope = creationScopeFor(principal, 'PROJECT_PUBLIC');
+					if (ownerScope === null) {
+						throw new TlonError('FORBIDDEN', 'principal may not create artifacts', { projectId });
+					}
 					const created = await insertArtifact(
 						ctx,
 						tx,
@@ -331,7 +343,7 @@ export function expansionMethods(ctx: Ctx) {
 							body: data.artifact.body,
 							structured,
 							status: 'PROPOSED',
-							ownerScope: 'PROJECT_PUBLIC',
+							ownerScope,
 							locked: false,
 							pinned: false
 						},
@@ -359,7 +371,7 @@ export function expansionMethods(ctx: Ctx) {
 					candidateId,
 					artifactId
 				});
-				return loadExpansionDetail(tx, principal, projectId, expansionId);
+				return loadExpansionDetail(ctx, tx, principal, projectId, expansionId);
 			});
 		},
 
@@ -370,16 +382,16 @@ export function expansionMethods(ctx: Ctx) {
 			idempotencyKey: string | undefined,
 			input: unknown
 		): Promise<AcceptExpansionResult> {
-			if (idempotencyKey === undefined || idempotencyKey.trim() === '') {
-				throw new TlonError(
-					'IDEMPOTENCY_KEY_REQUIRED',
-					'an Idempotency-Key is required to accept an expansion'
-				);
-			}
-			const key = parseInput(IdempotencyKey, idempotencyKey);
-			const data = parseInput(AcceptExpansionInput, input);
 			return db.transaction(async (tx) => {
-				await authorize(tx, principal, projectId, 'write');
+				await authorize(tx, principal, projectId, 'expansion.review');
+				if (idempotencyKey === undefined || idempotencyKey.trim() === '') {
+					throw new TlonError(
+						'IDEMPOTENCY_KEY_REQUIRED',
+						'an Idempotency-Key is required to accept an expansion'
+					);
+				}
+				const key = parseInput(IdempotencyKey, idempotencyKey);
+				const data = parseInput(AcceptExpansionInput, input);
 				const row = await lockExpansion(tx, projectId, expansionId);
 				const leftRelationType = data.leftRelationType ?? DEFAULT_CHILD_RELATION_TYPE;
 				const rightRelationType = data.rightRelationType ?? DEFAULT_CHILD_RELATION_TYPE;
@@ -480,7 +492,7 @@ export function expansionMethods(ctx: Ctx) {
 					);
 				}
 
-				const bridge = await getArtifactRow(tx, principal, projectId, chosen.artifactId);
+				const bridge = await getArtifactRow(ctx, tx, principal, projectId, chosen.artifactId);
 				if (bridge.row.locked) {
 					throw new TlonError('ARTIFACT_LOCKED', 'bridge artifact is locked', {
 						artifactId: bridge.row.id
@@ -522,7 +534,7 @@ export function expansionMethods(ctx: Ctx) {
 				});
 				const childIds: string[] = [];
 				for (const child of planned) {
-					await assertAcyclicInProject(tx, projectId, child);
+					await assertAcyclicInProject(ctx, tx, principal, projectId, child);
 					const now = ctx.now();
 					const id = ctx.newId();
 					await tx.insert(relations).values({
@@ -567,9 +579,9 @@ export function expansionMethods(ctx: Ctx) {
 			expansionId: string,
 			input: unknown = {}
 		): Promise<ExpansionDetail> {
-			const data = parseInput(RejectExpansionInput, input);
 			return db.transaction(async (tx) => {
-				await authorize(tx, principal, projectId, 'write');
+				await authorize(tx, principal, projectId, 'expansion.review');
+				const data = parseInput(RejectExpansionInput, input);
 				const row = await lockExpansion(tx, projectId, expansionId);
 				if (!OPEN.includes(row.status)) {
 					throw new TlonError('INVALID_STATE', 'expansion is already final', {
@@ -636,7 +648,7 @@ export function expansionMethods(ctx: Ctx) {
 						.where(eq(expansions.id, expansionId));
 					await audit(ctx, tx, principal, projectId, 'expansion.cancel', expansionId);
 				}
-				return loadExpansionDetail(tx, principal, projectId, expansionId);
+				return loadExpansionDetail(ctx, tx, principal, projectId, expansionId);
 			});
 		}
 	};

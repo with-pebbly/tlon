@@ -297,7 +297,10 @@ describe('relations', () => {
 		const { service } = t;
 		const { project } = await seedPair(service);
 		await expectCode(
-			service.getProject({ id: 'stranger', kind: 'HUMAN', role: 'HUMAN' }, project.id),
+			service.getProject(
+				{ id: 'stranger', kind: 'HUMAN', role: 'HUMAN', projectId: null },
+				project.id
+			),
 			'FORBIDDEN'
 		);
 		await expectCode(

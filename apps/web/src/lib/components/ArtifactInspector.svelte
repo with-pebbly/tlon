@@ -18,6 +18,8 @@
 	import KindBadge from './KindBadge.svelte';
 	import NarrativeFields from './NarrativeFields.svelte';
 	import RevisionHistory from './RevisionHistory.svelte';
+	import ScopeBadge from './ScopeBadge.svelte';
+	import SourceRefList from './SourceRefList.svelte';
 
 	/** Mounted once per (artifact id, head revision): the draft starts from that revision. */
 	let { artifact }: { artifact: Artifact } = $props();
@@ -66,6 +68,20 @@
 	);
 	const category = $derived(
 		artifactCategory(artifact, ws.pendingCandidateIds, ws.acceptedBridgeIds)
+	);
+	/** Set when this C_SHARED artifact was created by publishing a disclosure. */
+	const disclosure = $derived(
+		artifact.ownerScope === 'C_SHARED' ? ws.disclosureBySharedArtifact.get(artifact.id) : undefined
+	);
+	const activeGrantees = $derived(
+		ws.grants
+			.filter(
+				(g) =>
+					g.artifactId === artifact.id &&
+					g.revokedAt === null &&
+					(g.expiresAt === null || Date.parse(g.expiresAt) > Date.now())
+			)
+			.map((g) => ws.principalLabel(g.granteePrincipalId))
 	);
 
 	function setNarrativeField(key: string, value: string) {
@@ -120,6 +136,7 @@
 	<header class="flex flex-col gap-1">
 		<div class="flex items-center gap-2">
 			<KindBadge kind={artifact.kind} />
+			<ScopeBadge scope={artifact.ownerScope} long />
 			<span class="text-[11px] text-zinc-500">{CATEGORY_LABEL[category]}</span>
 			<span class="ml-auto font-mono text-[11px] text-zinc-400" title={artifact.id}
 				>{shortId(artifact.id)} · v{artifact.version}</span
@@ -128,7 +145,10 @@
 		<h2 class="text-[15px] leading-snug font-semibold text-zinc-900">{artifact.title}</h2>
 		<div class="flex flex-wrap gap-x-3 text-[11px] text-zinc-500">
 			<span>creator <span class="font-mono text-zinc-700">{artifact.creatorRole}</span></span>
-			<span>scope <span class="font-mono text-zinc-700">{artifact.ownerScope}</span></span>
+			{#if activeGrantees.length > 0}
+				<span>readable by grant <span class="text-zinc-700">{activeGrantees.join(', ')}</span></span
+				>
+			{/if}
 			<span>updated {formatTime(artifact.updatedAt)}</span>
 		</div>
 		<div class="mt-1 flex gap-1.5">
@@ -155,6 +175,41 @@
 			</button>
 		</div>
 	</header>
+
+	{#if disclosure}
+		<section
+			class="flex flex-col gap-1.5 rounded-lg border border-amber-200 bg-amber-50/50 p-2.5 text-xs"
+			aria-label="Disclosure provenance"
+		>
+			<h3 class="section-title text-amber-800">Disclosure provenance</h3>
+			<div class="flex flex-wrap gap-x-3 text-zinc-600">
+				<span
+					>disclosure <span class="font-mono text-zinc-800" title={disclosure.id}
+						>{shortId(disclosure.id)}</span
+					></span
+				>
+				<span
+					>from <span class="text-zinc-800">{ws.principalLabel(disclosure.fromPrincipalId)}</span
+					></span
+				>
+				<span
+					>to <span class="text-zinc-800">{ws.principalLabel(disclosure.toPrincipalId)}</span></span
+				>
+				{#if disclosure.reviewedAt}
+					<span
+						>published {formatTime(disclosure.reviewedAt)}{disclosure.reviewedBy
+							? ` by ${ws.principalLabel(disclosure.reviewedBy)}`
+							: ''}</span
+					>
+				{/if}
+			</div>
+			{#if disclosure.redactionNote}
+				<p class="text-zinc-600">Redaction note: {disclosure.redactionNote}</p>
+			{/if}
+			<div class="text-[11px] text-zinc-500">Cited sources (not granted to the destination):</div>
+			<SourceRefList refs={disclosure.sourceRefs} />
+		</section>
+	{/if}
 
 	{#if conflict}
 		<div

@@ -131,6 +131,19 @@
 	{#if ws.pending > 0 || ws.loading}
 		<span class="text-xs text-zinc-400">Syncing…</span>
 	{/if}
+	<button class="btn" onclick={() => (ws.gatewayPanel = 'agents')}>Agents</button>
+	<button
+		class={['btn', ws.pendingDisclosures.length > 0 && 'border-amber-300 text-amber-800']}
+		title="Review disclosures proposed by C"
+		onclick={() => (ws.gatewayPanel = 'disclosures')}
+	>
+		Disclosures
+		{#if ws.pendingDisclosures.length > 0}
+			<span class="chip border-amber-300 bg-amber-50 text-amber-800"
+				>{ws.pendingDisclosures.length} pending</span
+			>
+		{/if}
+	</button>
 	<button class="btn" onclick={exportJson} disabled={exporting}>Export</button>
 	<button class="btn btn-primary" onclick={() => (ws.newArtifactOpen = true)}>+ New artifact</button
 	>

@@ -149,13 +149,23 @@ export const ExpansionCandidate = z.object({
 });
 export type ExpansionCandidate = z.infer<typeof ExpansionCandidate>;
 
-/** Human/agent identity resolved server-side; never taken from a client-supplied role field. */
+/**
+ * Identity resolved server-side by the gateway; never taken from a client-supplied
+ * role field. Agent principals are bound to exactly one project (`projectId`);
+ * human principals are project-agnostic and authorised through `members`.
+ */
 export const Principal = z.object({
 	id: z.string().min(1),
 	kind: z.enum(['HUMAN', 'AGENT']),
-	role: Role
+	role: Role,
+	projectId: Uuid.nullable().default(null)
 });
 export type Principal = z.infer<typeof Principal>;
 
-/** M0–M2 runs single-user; M3 replaces this with authenticated principals and tokens. */
-export const LOCAL_HUMAN: Principal = { id: 'local-human', kind: 'HUMAN', role: 'HUMAN' };
+/** The local operator: single human, reached without a token from loopback only (ADR 0007). */
+export const LOCAL_HUMAN: Principal = {
+	id: 'local-human',
+	kind: 'HUMAN',
+	role: 'HUMAN',
+	projectId: null
+};

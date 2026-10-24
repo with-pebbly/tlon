@@ -18,17 +18,20 @@ import {
 	type Relation,
 	type RelationStatus,
 	type Role,
-	type CandidateReviewStatus
+	type CandidateReviewStatus,
+	OWNER_SCOPES
 } from '@tlon/contracts';
-import { expansionLineage, visibleScopesFor } from '@tlon/core';
-import { and, asc, eq, inArray, type SQL } from 'drizzle-orm';
+import { expansionLineage, isActionAllowed, visibleScopesFor } from '@tlon/core';
+import { and, asc, eq, exists, gt, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
 
 import type { Db } from './db.ts';
+import type { Ctx } from './internal.ts';
 import {
 	artifactRevisions,
 	artifacts,
 	expansionCandidates,
 	expansions,
+	grants,
 	relations,
 	type ArtifactRow,
 	type CandidateRow,
@@ -105,8 +108,59 @@ export function toCandidate(row: CandidateRow): ExpansionCandidate {
 	};
 }
 
-/** Artifact rows visible to `principal` (M3 seam: scope filter), joined with the head version. */
+/**
+ * THE artifact-visibility predicate (§7.1, spec rule 4): an artifact is visible iff its
+ * ownerScope ∈ visibleScopesFor(principal) OR the principal holds an active READ grant
+ * (not revoked, not expired at `now`) on it. Every artifact/relation/revision/graph/
+ * list/search read composes this into its SQL; it must reference the `artifacts` table.
+ * Returns `undefined` when the principal's scopes already cover every scope (no filter).
+ */
+export function visibleArtifactPredicate(q: Db, principal: Principal, now: Date): SQL | undefined {
+	const scopes = visibleScopesFor(principal);
+	if (OWNER_SCOPES.every((scope) => scopes.includes(scope))) return undefined;
+	const byScope = scopes.length === 0 ? sql`false` : inArray(artifacts.ownerScope, [...scopes]);
+	// Grants are keyed by agent principal uuid; humans never hold them and never get here.
+	if (principal.kind !== 'AGENT') return byScope;
+	const granted = exists(
+		q
+			.select({ one: sql`1` })
+			.from(grants)
+			.where(
+				and(
+					eq(grants.granteePrincipalId, principal.id),
+					eq(grants.artifactId, artifacts.id),
+					eq(grants.permission, 'READ'),
+					isNull(grants.revokedAt),
+					or(isNull(grants.expiresAt), gt(grants.expiresAt, now))
+				)
+			)
+	);
+	return or(byScope, granted);
+}
+
+/** Ids of artifacts of `projectId` visible to `principal`, as a subquery. */
+function visibleArtifactIds(q: Db, principal: Principal, now: Date, projectId: string) {
+	return q
+		.select({ id: artifacts.id })
+		.from(artifacts)
+		.where(and(eq(artifacts.projectId, projectId), visibleArtifactPredicate(q, principal, now)));
+}
+
+/** Relation visibility (spec rule 5): both endpoints must be visible. */
+function visibleRelationPredicate(
+	q: Db,
+	principal: Principal,
+	now: Date,
+	projectId: string
+): SQL | undefined {
+	if (visibleArtifactPredicate(q, principal, now) === undefined) return undefined;
+	const ids = visibleArtifactIds(q, principal, now, projectId);
+	return and(inArray(relations.fromId, ids), inArray(relations.toId, ids));
+}
+
+/** Artifact rows visible to `principal`, joined with the head version. */
 export async function selectArtifacts(
+	ctx: Ctx,
 	q: Db,
 	principal: Principal,
 	projectId: string,
@@ -120,7 +174,7 @@ export async function selectArtifacts(
 		.where(
 			and(
 				eq(artifacts.projectId, projectId),
-				inArray(artifacts.ownerScope, [...visibleScopesFor(principal)]),
+				visibleArtifactPredicate(q, principal, ctx.now()),
 				where
 			)
 		)
@@ -131,7 +185,9 @@ export async function selectArtifacts(
 
 export type ArtifactWithVersion = { row: ArtifactRow; version: number };
 
+/** Invisible and nonexistent artifacts are indistinguishable: same code, same message. */
 export async function getArtifactRow(
+	ctx: Ctx,
 	q: Db,
 	principal: Principal,
 	projectId: string,
@@ -145,14 +201,34 @@ export async function getArtifactRow(
 			and(
 				eq(artifacts.id, artifactId),
 				eq(artifacts.projectId, projectId),
-				inArray(artifacts.ownerScope, [...visibleScopesFor(principal)])
+				visibleArtifactPredicate(q, principal, ctx.now())
 			)
 		);
 	if (!found) throw new TlonError('ARTIFACT_NOT_FOUND', 'artifact not found', { artifactId });
 	return { row: found.a, version: found.version };
 }
 
-function toRelation(row: RelationRow, expandedBy: ReadonlyMap<string, string>): Relation {
+/** Number of artifacts of the project the principal can see (never a global count). */
+export async function countVisibleArtifacts(
+	ctx: Ctx,
+	q: Db,
+	principal: Principal,
+	projectId: string
+): Promise<number> {
+	const [row] = await q
+		.select({ n: sql<number>`count(*)::int` })
+		.from(artifacts)
+		.where(
+			and(eq(artifacts.projectId, projectId), visibleArtifactPredicate(q, principal, ctx.now()))
+		);
+	return row?.n ?? 0;
+}
+
+function toRelation(
+	row: RelationRow,
+	expandedBy: ReadonlyMap<string, string>,
+	scrub: { visibleProvenance: ReadonlySet<string> } | null
+): Relation {
 	return {
 		id: row.id,
 		projectId: row.projectId,
@@ -160,9 +236,11 @@ function toRelation(row: RelationRow, expandedBy: ReadonlyMap<string, string>): 
 		toId: row.toId,
 		type: row.type,
 		status: row.status as RelationStatus,
-		expansionId: row.expansionId,
-		provenanceArtifactIds: row.provenanceArtifactIds,
-		expandedByExpansionId: expandedBy.get(row.id) ?? null,
+		expansionId: scrub ? null : row.expansionId,
+		provenanceArtifactIds: scrub
+			? row.provenanceArtifactIds.filter((id) => scrub.visibleProvenance.has(id))
+			: row.provenanceArtifactIds,
+		expandedByExpansionId: scrub ? null : (expandedBy.get(row.id) ?? null),
 		createdAt: row.createdAt.toISOString(),
 		updatedAt: row.updatedAt.toISOString()
 	};
@@ -178,16 +256,51 @@ async function acceptedExpansionByTarget(q: Db, projectId: string): Promise<Map<
 	return map;
 }
 
-export async function loadRelations(q: Db, projectId: string, where?: SQL): Promise<Relation[]> {
+/**
+ * Relations visible to `principal` (both endpoints visible). Principals without
+ * `expansion.read` (A/B) never learn that expansions exist: expansion links are nulled
+ * and provenance is cut down to artifacts they can see.
+ */
+export async function loadRelations(
+	ctx: Ctx,
+	q: Db,
+	principal: Principal,
+	projectId: string,
+	where?: SQL
+): Promise<Relation[]> {
+	const now = ctx.now();
+	const scrubbed = !isActionAllowed(principal, 'expansion.read');
 	const [rows, expandedBy] = await Promise.all([
 		q
 			.select()
 			.from(relations)
-			.where(and(eq(relations.projectId, projectId), where))
+			.where(
+				and(
+					eq(relations.projectId, projectId),
+					visibleRelationPredicate(q, principal, now, projectId),
+					where
+				)
+			)
 			.orderBy(asc(relations.createdAt), asc(relations.id)),
-		acceptedExpansionByTarget(q, projectId)
+		scrubbed ? Promise.resolve(new Map<string, string>()) : acceptedExpansionByTarget(q, projectId)
 	]);
-	return rows.map((r) => toRelation(r, expandedBy));
+	if (!scrubbed) return rows.map((r) => toRelation(r, expandedBy, null));
+	const cited = [...new Set(rows.flatMap((r) => r.provenanceArtifactIds))];
+	const visibleProvenance = new Set<string>();
+	if (cited.length > 0) {
+		const found = await q
+			.select({ id: artifacts.id })
+			.from(artifacts)
+			.where(
+				and(
+					eq(artifacts.projectId, projectId),
+					inArray(artifacts.id, cited),
+					visibleArtifactPredicate(q, principal, now)
+				)
+			);
+		for (const f of found) visibleProvenance.add(f.id);
+	}
+	return rows.map((r) => toRelation(r, expandedBy, { visibleProvenance }));
 }
 
 /** Child relations in interval order: left→C first, then C→right. */
@@ -306,6 +419,7 @@ export async function loadLineage(
 }
 
 export async function loadExpansionDetail(
+	ctx: Ctx,
 	q: Db,
 	principal: Principal,
 	projectId: string,
@@ -315,10 +429,10 @@ export async function loadExpansionDetail(
 	const [candidates, lineage, childRelations, targetRelation] = await Promise.all([
 		loadCandidates(q, projectId, eq(expansionCandidates.expansionId, expansionId)),
 		loadLineage(q, projectId, expansion.parentExpansionId),
-		loadRelations(q, projectId, eq(relations.expansionId, expansionId)),
+		loadRelations(ctx, q, principal, projectId, eq(relations.expansionId, expansionId)),
 		expansion.targetRelationId === null
 			? Promise.resolve([])
-			: loadRelations(q, projectId, eq(relations.id, expansion.targetRelationId))
+			: loadRelations(ctx, q, principal, projectId, eq(relations.id, expansion.targetRelationId))
 	]);
 	const wanted = [
 		...new Set([
@@ -328,10 +442,9 @@ export async function loadExpansionDetail(
 		])
 	];
 	const visible = new Map(
-		(await selectArtifacts(q, principal, projectId, inArray(artifacts.id, wanted))).map((a) => [
-			a.id,
-			a
-		])
+		(await selectArtifacts(ctx, q, principal, projectId, inArray(artifacts.id, wanted))).map(
+			(a) => [a.id, a]
+		)
 	);
 	const left = visible.get(expansion.leftArtifactId);
 	const right = visible.get(expansion.rightArtifactId);

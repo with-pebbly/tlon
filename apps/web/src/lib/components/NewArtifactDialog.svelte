@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { getWorkspace } from '$lib/state/context';
 	import { toasts } from '$lib/state/toasts.svelte';
+	import { SCOPE_DESCRIPTION, SCOPE_LABEL } from '$lib/ui';
 	import { parseJsonObject, validateStructured } from '$lib/validation';
-	import { ARTIFACT_KINDS, type ArtifactKind } from '@tlon/contracts';
+	import { ARTIFACT_KINDS, type ArtifactKind, type OwnerScope } from '@tlon/contracts';
 
 	import Modal from './Modal.svelte';
 	import NarrativeFields from './NarrativeFields.svelte';
@@ -16,6 +17,9 @@
 	let title = $state('');
 	let body = $state('');
 	let status = $state<(typeof CREATE_STATUSES)[number]>('DRAFT');
+	/** Public first: it is the server default for human-created artifacts. */
+	const SCOPE_OPTIONS: OwnerScope[] = ['PROJECT_PUBLIC', 'A_PRIVATE', 'B_PRIVATE', 'C_SHARED'];
+	let ownerScope = $state<OwnerScope>('PROJECT_PUBLIC');
 	let structuredText = $state('{}');
 	let saving = $state(false);
 
@@ -43,6 +47,7 @@
 				title: title.trim(),
 				body,
 				status,
+				ownerScope,
 				structured: parsed.value
 			});
 			onclose();
@@ -74,6 +79,17 @@
 					{#each CREATE_STATUSES as option (option)}<option value={option}>{option}</option>{/each}
 				</select>
 			</div>
+		</div>
+		<div class="grid grid-cols-[140px_1fr] items-end gap-2">
+			<div>
+				<label class="label" for="na-scope">Owner scope</label>
+				<select id="na-scope" class="input" bind:value={ownerScope}>
+					{#each SCOPE_OPTIONS as option (option)}<option value={option}
+							>{SCOPE_LABEL[option]}</option
+						>{/each}
+				</select>
+			</div>
+			<p class="pb-1 text-[11px] text-zinc-500">{SCOPE_DESCRIPTION[ownerScope]}</p>
 		</div>
 		<div>
 			<label class="label" for="na-body">Body</label>

@@ -8,6 +8,13 @@
       "when": 1792850855706,
       "tag": "0000_glossy_stature",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1792856352615,
+      "tag": "0001_slim_masked_marvel",
+      "breakpoints": true
     }
   ]
 }

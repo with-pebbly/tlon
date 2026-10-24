@@ -209,7 +209,102 @@ export const auditEvents = pgTable(
 		metadata: jsonb('metadata').$type<Record<string, unknown>>().notNull(),
 		createdAt: ts('created_at').notNull()
 	},
-	(t) => [index('audit_events_project_idx').on(t.projectId, t.createdAt)]
+	(t) => [
+		index('audit_events_project_idx').on(t.projectId, t.createdAt),
+		index('audit_events_actor_idx').on(t.projectId, t.actorId, t.createdAt)
+	]
+);
+
+/** One identity per (project, role, name); the role lives here, never in a request (§7.2). */
+export const agentPrincipals = pgTable(
+	'agent_principals',
+	{
+		id: uuid('id').primaryKey(),
+		projectId: uuid('project_id')
+			.notNull()
+			.references(() => projects.id),
+		role: text('role').notNull(),
+		name: text('name').notNull(),
+		createdAt: ts('created_at').notNull(),
+		disabledAt: ts('disabled_at')
+	},
+	(t) => [
+		unique('agent_principals_project_role_name_uq').on(t.projectId, t.role, t.name),
+		index('agent_principals_project_idx').on(t.projectId)
+	]
+);
+
+/** Only the sha256 hex of a token is stored; the plaintext is returned once on issue. */
+export const agentTokens = pgTable(
+	'agent_tokens',
+	{
+		id: uuid('id').primaryKey(),
+		principalId: uuid('principal_id')
+			.notNull()
+			.references(() => agentPrincipals.id),
+		tokenHash: text('token_hash').notNull().unique(),
+		createdAt: ts('created_at').notNull(),
+		expiresAt: ts('expires_at').notNull(),
+		revokedAt: ts('revoked_at')
+	},
+	(t) => [index('agent_tokens_principal_idx').on(t.principalId)]
+);
+
+/** Explicit per-artifact read access for an agent principal (created by humans or published disclosures). */
+export const grants = pgTable(
+	'grants',
+	{
+		id: uuid('id').primaryKey(),
+		projectId: uuid('project_id')
+			.notNull()
+			.references(() => projects.id),
+		granteePrincipalId: uuid('grantee_principal_id')
+			.notNull()
+			.references(() => agentPrincipals.id),
+		artifactId: uuid('artifact_id').notNull(),
+		permission: text('permission').notNull(),
+		createdBy: text('created_by').notNull(),
+		createdAt: ts('created_at').notNull(),
+		expiresAt: ts('expires_at'),
+		revokedAt: ts('revoked_at')
+	},
+	(t) => [
+		foreignKey({
+			name: 'grants_artifact_fk',
+			columns: [t.projectId, t.artifactId],
+			foreignColumns: [artifacts.projectId, artifacts.id]
+		}),
+		index('grants_grantee_artifact_idx').on(t.granteePrincipalId, t.artifactId),
+		index('grants_project_idx').on(t.projectId)
+	]
+);
+
+export const disclosures = pgTable(
+	'disclosures',
+	{
+		id: uuid('id').primaryKey(),
+		projectId: uuid('project_id')
+			.notNull()
+			.references(() => projects.id),
+		fromPrincipalId: text('from_principal_id').notNull(),
+		toPrincipalId: uuid('to_principal_id')
+			.notNull()
+			.references(() => agentPrincipals.id),
+		sourceRefs: jsonb('source_refs')
+			.$type<Array<{ artifactId: string; revisionId: string }>>()
+			.notNull(),
+		sharedPayload: jsonb('shared_payload').$type<Record<string, unknown>>().notNull(),
+		redactionNote: text('redaction_note'),
+		status: text('status').notNull(),
+		sharedArtifactId: uuid('shared_artifact_id').references(() => artifacts.id),
+		reviewedBy: text('reviewed_by'),
+		createdAt: ts('created_at').notNull(),
+		reviewedAt: ts('reviewed_at')
+	},
+	(t) => [
+		index('disclosures_project_status_idx').on(t.projectId, t.status, t.createdAt),
+		index('disclosures_to_idx').on(t.toPrincipalId, t.status)
+	]
 );
 
 export type ProjectRow = typeof projects.$inferSelect;
@@ -218,3 +313,6 @@ export type RevisionRow = typeof artifactRevisions.$inferSelect;
 export type RelationRow = typeof relations.$inferSelect;
 export type ExpansionRow = typeof expansions.$inferSelect;
 export type CandidateRow = typeof expansionCandidates.$inferSelect;
+export type AgentPrincipalRow = typeof agentPrincipals.$inferSelect;
+export type GrantRow = typeof grants.$inferSelect;
+export type DisclosureRow = typeof disclosures.$inferSelect;

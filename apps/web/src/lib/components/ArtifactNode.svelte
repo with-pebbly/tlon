@@ -6,6 +6,7 @@
 
 	import Icon from './Icon.svelte';
 	import KindBadge from './KindBadge.svelte';
+	import ScopeBadge from './ScopeBadge.svelte';
 
 	let { data, selected }: NodeProps<ArtifactFlowNode> = $props();
 
@@ -26,6 +27,7 @@
 	<Handle type="target" position={Position.Left} />
 	<div class="flex items-center gap-1.5 text-[11px]">
 		<KindBadge kind={artifact.kind} />
+		<ScopeBadge scope={artifact.ownerScope} />
 		<span class={['font-medium', STATUS_TEXT[artifact.status]]}>{artifact.status}</span>
 		{#if data.category === 'candidate'}
 			<span class="text-accent-600">candidate</span>

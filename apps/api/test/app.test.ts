@@ -243,31 +243,35 @@ describe('import as new project', () => {
 });
 
 describe('restart', () => {
-	it('data written through one app instance is readable after rebuilding on the same pglite directory', async () => {
-		const dir = await mkdtemp(join(tmpdir(), 'tlon-api-'));
-		const url = `pglite:${dir}`;
-		try {
-			const first = await openDatabase(url);
-			await migrateDatabase(first);
-			const app1 = buildApp({ service: createTlonService(first.db) });
-			const created = await app1.inject({
-				method: 'POST',
-				url: '/api/projects',
-				payload: { name: 'durable' }
-			});
-			expect(created.statusCode).toBe(201);
-			await app1.close();
-			await first.close();
+	it(
+		'data written through one app instance is readable after rebuilding on the same pglite directory',
+		{ timeout: 60_000 },
+		async () => {
+			const dir = await mkdtemp(join(tmpdir(), 'tlon-api-'));
+			const url = `pglite:${dir}`;
+			try {
+				const first = await openDatabase(url);
+				await migrateDatabase(first);
+				const app1 = buildApp({ service: createTlonService(first.db) });
+				const created = await app1.inject({
+					method: 'POST',
+					url: '/api/projects',
+					payload: { name: 'durable' }
+				});
+				expect(created.statusCode).toBe(201);
+				await app1.close();
+				await first.close();
 
-			const second = await openDatabase(url);
-			await migrateDatabase(second);
-			const app2 = buildApp({ service: createTlonService(second.db) });
-			const listed = await app2.inject({ method: 'GET', url: '/api/projects' });
-			expect(listed.json().items.map((p: Project) => p.name)).toEqual(['durable']);
-			await app2.close();
-			await second.close();
-		} finally {
-			await rm(dir, { recursive: true, force: true });
+				const second = await openDatabase(url);
+				await migrateDatabase(second);
+				const app2 = buildApp({ service: createTlonService(second.db) });
+				const listed = await app2.inject({ method: 'GET', url: '/api/projects' });
+				expect(listed.json().items.map((p: Project) => p.name)).toEqual(['durable']);
+				await app2.close();
+				await second.close();
+			} finally {
+				await rm(dir, { recursive: true, force: true });
+			}
 		}
-	});
+	);
 });

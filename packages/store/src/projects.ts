@@ -9,22 +9,31 @@ import {
 	ProjectSettings,
 	Uuid
 } from '@tlon/contracts';
-import { asc, count, eq, inArray } from 'drizzle-orm';
+import { isActionAllowed } from '@tlon/core';
+import { asc, eq, inArray } from 'drizzle-orm';
 
-import { audit, authorize, parseInput, type Ctx } from './internal.ts';
+import { assertAllowed, audit, authorize, parseInput, type Ctx } from './internal.ts';
 import {
+	countVisibleArtifacts,
 	loadCandidates,
 	loadExpansions,
 	loadRelations,
 	selectArtifacts,
 	toProject
 } from './projections.ts';
-import { artifacts, members, projects } from './schema.ts';
+import { members, projects } from './schema.ts';
 
 export function projectMethods(ctx: Ctx) {
 	const { db } = ctx;
 	return {
 		async listProjects(principal: Principal): Promise<ProjectList> {
+			assertAllowed(principal, 'project.read');
+			// Agents are bound to a single project and are not `members`.
+			if (principal.kind === 'AGENT') {
+				if (principal.projectId === null) return { items: [] };
+				const rows = await db.select().from(projects).where(eq(projects.id, principal.projectId));
+				return { items: rows.map(toProject) };
+			}
 			const memberOf = await db
 				.select({ projectId: members.projectId })
 				.from(members)
@@ -49,6 +58,7 @@ export function projectMethods(ctx: Ctx) {
 			input: unknown,
 			options: { id?: string } = {}
 		): Promise<Project> {
+			assertAllowed(principal, 'project.admin');
 			const data = parseInput(CreateProjectInput, input);
 			const settings = ProjectSettings.parse({ ...data.settings });
 			const id = options.id ?? ctx.newId();
@@ -77,26 +87,26 @@ export function projectMethods(ctx: Ctx) {
 		},
 
 		async getProject(principal: Principal, projectId: string): Promise<Project> {
-			return toProject(await authorize(db, principal, projectId, 'read'));
+			return toProject(await authorize(db, principal, projectId, 'project.read'));
 		},
 
 		async getGraph(principal: Principal, projectId: string): Promise<ProjectGraph> {
-			const project = await authorize(db, principal, projectId, 'read');
-			const [{ total } = { total: 0 }] = await db
-				.select({ total: count() })
-				.from(artifacts)
-				.where(eq(artifacts.projectId, projectId));
+			const project = await authorize(db, principal, projectId, 'project.read');
+			// The limit applies to what the principal can see: hidden counts must not leak.
+			const total = await countVisibleArtifacts(ctx, db, principal, projectId);
 			if (total > MAX_GRAPH_ARTIFACTS) {
 				throw new TlonError('GRAPH_TOO_LARGE', 'project graph exceeds the projection limit', {
 					artifacts: total,
 					max: MAX_GRAPH_ARTIFACTS
 				});
 			}
+			// A/B never see expansions or candidates (they reference the other side's material).
+			const withExpansions = isActionAllowed(principal, 'expansion.read');
 			const [artifactList, relationList, expansionList, candidateList] = await Promise.all([
-				selectArtifacts(db, principal, projectId),
-				loadRelations(db, projectId),
-				loadExpansions(db, projectId),
-				loadCandidates(db, projectId)
+				selectArtifacts(ctx, db, principal, projectId),
+				loadRelations(ctx, db, principal, projectId),
+				withExpansions ? loadExpansions(db, projectId) : Promise.resolve([]),
+				withExpansions ? loadCandidates(db, projectId) : Promise.resolve([])
 			]);
 			return {
 				project: toProject(project),

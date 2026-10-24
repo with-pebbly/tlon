@@ -1,4 +1,11 @@
-import { LOCAL_HUMAN, type Artifact, type ExpansionDetail, type Relation } from '@tlon/contracts';
+import {
+	LOCAL_HUMAN,
+	type AgentRole,
+	type Artifact,
+	type ExpansionDetail,
+	type Principal,
+	type Relation
+} from '@tlon/contracts';
 import { expect } from 'vitest';
 
 import type { TlonService } from '../src/service.ts';
@@ -86,3 +93,16 @@ export async function expandTree(
 }
 
 export type Detail = ExpansionDetail;
+
+/** Creates an agent principal in `projectId` (as the human), issues a token and resolves it back to a Principal. */
+export async function makeAgent(
+	service: TlonService,
+	projectId: string,
+	role: AgentRole,
+	name: string = role.toLowerCase()
+): Promise<{ principal: Principal; token: string; tokenId: string; agentId: string }> {
+	const agent = await service.createAgent(P, projectId, { role, name });
+	const issued = await service.issueToken(P, projectId, agent.id, {});
+	const principal = await service.authenticateToken(issued.token);
+	return { principal, token: issued.token, tokenId: issued.tokenId, agentId: agent.id };
+}

@@ -1,5 +1,8 @@
 <script lang="ts">
-	import { CATEGORY_CARD, CATEGORY_LABEL, type ArtifactCategory } from '$lib/ui';
+	import { CATEGORY_CARD, CATEGORY_LABEL, SCOPE_DESCRIPTION, type ArtifactCategory } from '$lib/ui';
+	import { OWNER_SCOPES } from '@tlon/contracts';
+
+	import ScopeBadge from './ScopeBadge.svelte';
 
 	const CATEGORIES: ArtifactCategory[] = ['fact', 'explanation', 'candidate', 'bridge', 'rejected'];
 
@@ -18,6 +21,14 @@
 			<li class="flex items-center gap-2">
 				<span class={['inline-block h-3.5 w-6 rounded border', CATEGORY_CARD[category]]}></span>
 				{CATEGORY_LABEL[category]}
+			</li>
+		{/each}
+	</ul>
+	<ul class="flex flex-col gap-1" aria-label="Owner scopes">
+		{#each OWNER_SCOPES as scope (scope)}
+			<li class="flex items-start gap-2">
+				<span class="w-12 shrink-0"><ScopeBadge {scope} /></span>
+				<span class="text-[11px] leading-[18px]">{SCOPE_DESCRIPTION[scope]}</span>
 			</li>
 		{/each}
 	</ul>

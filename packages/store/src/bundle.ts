@@ -14,7 +14,7 @@ import { asc, count, eq, inArray } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 
 import type { Db } from './db.ts';
-import { audit, authorize, chunk, parseInput, type Ctx } from './internal.ts';
+import { assertAllowed, audit, authorize, chunk, parseInput, type Ctx } from './internal.ts';
 import {
 	loadCandidates,
 	loadExpansions,
@@ -77,7 +77,7 @@ export function bundleMethods(ctx: Ctx) {
 		parsed: ExportBundle,
 		remapIds: boolean
 	): Promise<ImportResult> {
-		await authorize(tx, principal, projectId, 'write');
+		await authorize(tx, principal, projectId, 'import');
 		const [existing] = await tx
 			.select({ n: count() })
 			.from(artifacts)
@@ -236,17 +236,17 @@ export function bundleMethods(ctx: Ctx) {
 
 	return {
 		async exportProject(principal: Principal, projectId: string): Promise<ExportBundle> {
-			const project = await authorize(db, principal, projectId, 'read');
+			const project = await authorize(db, principal, projectId, 'export');
 			const [artifactList, revisionRows, relationList, expansionList, candidateList] =
 				await Promise.all([
-					selectArtifacts(db, principal, projectId),
+					selectArtifacts(ctx, db, principal, projectId),
 					db
 						.select({ r: artifactRevisions })
 						.from(artifactRevisions)
 						.innerJoin(artifacts, eq(artifacts.id, artifactRevisions.artifactId))
 						.where(eq(artifacts.projectId, projectId))
 						.orderBy(asc(artifactRevisions.createdAt), asc(artifactRevisions.id)),
-					loadRelations(db, projectId),
+					loadRelations(ctx, db, principal, projectId),
 					loadExpansions(db, projectId),
 					loadCandidates(db, projectId)
 				]);
@@ -272,6 +272,7 @@ export function bundleMethods(ctx: Ctx) {
 			bundle: unknown,
 			options: unknown = {}
 		): Promise<ImportResult> {
+			assertAllowed(principal, 'import');
 			const { name, remapIds } = parseInput(ImportAsNewProjectOptions, options);
 			const parsed = parseBundle(bundle);
 			const issues = findBundleIntegrityIssues(parsed);
@@ -318,6 +319,9 @@ export function bundleMethods(ctx: Ctx) {
 			bundle: unknown,
 			options: unknown = {}
 		): Promise<ImportResult> {
+			// Refuse (binding, matrix, membership) before looking at the potentially huge bundle;
+			// runImport authorizes again inside the transaction.
+			await authorize(db, principal, projectId, 'import');
 			const { remapIds } = parseInput(ImportOptions, options);
 			const parsed = parseBundle(bundle);
 			const issues = findBundleIntegrityIssues(parsed);

@@ -5,6 +5,8 @@
 	import { Workspace } from '$lib/state/workspace.svelte';
 	import { onMount } from 'svelte';
 
+	import AgentsPanel from './AgentsPanel.svelte';
+	import DisclosuresPanel from './DisclosuresPanel.svelte';
 	import FractalView from './FractalView.svelte';
 	import GraphView from './GraphView.svelte';
 	import Inspector from './Inspector.svelte';
@@ -21,6 +23,9 @@
 
 	onMount(() => {
 		ws.reload().catch((error: unknown) => toasts.error(error));
+		// Agents/grants/disclosures feed the provenance and pending badges; a failure here
+		// is surfaced in the gateway panels and must not block the graph.
+		ws.reloadGateway().catch(() => {});
 	});
 
 	function onkeydown(event: KeyboardEvent) {
@@ -69,4 +74,9 @@
 
 {#if ws.newArtifactOpen}
 	<NewArtifactDialog onclose={() => (ws.newArtifactOpen = false)} />
+{/if}
+{#if ws.gatewayPanel === 'agents'}
+	<AgentsPanel onclose={() => (ws.gatewayPanel = null)} />
+{:else if ws.gatewayPanel === 'disclosures'}
+	<DisclosuresPanel onclose={() => (ws.gatewayPanel = null)} />
 {/if}

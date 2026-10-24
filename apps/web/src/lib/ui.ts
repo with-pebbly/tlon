@@ -1,4 +1,4 @@
-import type { ArtifactKind, ArtifactStatus } from '@tlon/contracts';
+import type { AgentRole, ArtifactKind, ArtifactStatus, OwnerScope } from '@tlon/contracts';
 
 /**
  * Visual category of an artifact (legend): semantic facts, explanations (BRIDGE kind),
@@ -55,6 +55,42 @@ export const STATUS_TEXT: Record<ArtifactStatus, string> = {
 	ACCEPTED: 'text-emerald-700',
 	REJECTED: 'text-zinc-400 line-through',
 	SUPERSEDED: 'text-zinc-400'
+};
+
+/** Short owner-scope label used on badges (A / B / C / Public). */
+export const SCOPE_SHORT: Record<OwnerScope, string> = {
+	A_PRIVATE: 'A',
+	B_PRIVATE: 'B',
+	C_SHARED: 'C',
+	PROJECT_PUBLIC: 'Public'
+};
+
+export const SCOPE_LABEL: Record<OwnerScope, string> = {
+	A_PRIVATE: 'A private',
+	B_PRIVATE: 'B private',
+	C_SHARED: 'C shared',
+	PROJECT_PUBLIC: 'Public'
+};
+
+export const SCOPE_DESCRIPTION: Record<OwnerScope, string> = {
+	A_PRIVATE: 'Visible to role A, C, validators and humans — never to B',
+	B_PRIVATE: 'Visible to role B, C, validators and humans — never to A',
+	C_SHARED: 'Visible to C, validators and humans; A/B only through a READ grant (disclosure)',
+	PROJECT_PUBLIC: 'Visible to C, validators and humans (A/B only see their own scope)'
+};
+
+export const SCOPE_BADGE: Record<OwnerScope, string> = {
+	A_PRIVATE: 'border-sky-300 bg-sky-50 text-sky-800',
+	B_PRIVATE: 'border-fuchsia-300 bg-fuchsia-50 text-fuchsia-800',
+	C_SHARED: 'border-amber-300 bg-amber-50 text-amber-800',
+	PROJECT_PUBLIC: 'border-zinc-300 bg-white text-zinc-600'
+};
+
+export const AGENT_ROLE_LABEL: Record<AgentRole, string> = {
+	A: 'A — private reasoner',
+	B: 'B — private reasoner',
+	C: 'C — bridge / discloser',
+	VALIDATOR: 'Validator — read-only'
 };
 
 export const shortId = (id: string) => id.slice(0, 8);

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { TlonError, type ErrorCode, type Principal, Uuid } from '@tlon/contracts';
+import { isActionAllowed, type GatewayAction } from '@tlon/core';
 import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 
@@ -63,29 +64,55 @@ export function asUuid(value: string, code: ErrorCode): string {
 const WRITE_ROLES: Record<string, true> = { OWNER: true, EDITOR: true };
 const READ_ROLES: Record<string, true> = { OWNER: true, EDITOR: true, VIEWER: true };
 
-export type Action = 'read' | 'write';
+/** Actions a read-only project member (VIEWER) may still perform. */
+const READ_ACTIONS: readonly GatewayAction[] = [
+	'project.read',
+	'expansion.read',
+	'disclosure.read',
+	'export'
+];
 
 /**
- * Single authorization point (§6): unknown project → PROJECT_NOT_FOUND, non-member or
- * insufficient role → FORBIDDEN. M3 replaces the membership check with grants.
+ * Single authorization point (§6, §7.2). Order matters and never leaks:
+ * 1. agents are bound to one project — any other project is PROJECT_NOT_FOUND;
+ * 2. unknown project → PROJECT_NOT_FOUND;
+ * 3. the role→action matrix (`isActionAllowed`) → FORBIDDEN;
+ * 4. humans additionally need a `members` row with a sufficient role → FORBIDDEN.
+ * Artifact-level visibility is enforced separately, in SQL, by `visibleArtifactPredicate`.
  */
 export async function authorize(
 	q: Db,
 	principal: Principal,
 	projectId: string,
-	action: Action
+	action: GatewayAction
 ): Promise<ProjectRow> {
 	asUuid(projectId, 'PROJECT_NOT_FOUND');
+	if (principal.kind === 'AGENT' && principal.projectId !== projectId) {
+		throw new TlonError('PROJECT_NOT_FOUND', 'project not found', { projectId });
+	}
 	const [project] = await q.select().from(projects).where(eq(projects.id, projectId));
 	if (!project) throw new TlonError('PROJECT_NOT_FOUND', 'project not found', { projectId });
-	const [member] = await q
-		.select()
-		.from(members)
-		.where(and(eq(members.projectId, projectId), eq(members.principalId, principal.id)));
-	const allowed = member && (action === 'write' ? WRITE_ROLES : READ_ROLES)[member.role] === true;
-	if (!allowed)
-		throw new TlonError('FORBIDDEN', 'principal may not access this project', { projectId });
+	if (!isActionAllowed(principal, action)) {
+		throw new TlonError('FORBIDDEN', 'principal may not perform this action', { projectId });
+	}
+	if (principal.kind === 'HUMAN') {
+		const [member] = await q
+			.select()
+			.from(members)
+			.where(and(eq(members.projectId, projectId), eq(members.principalId, principal.id)));
+		const roles = READ_ACTIONS.includes(action) ? READ_ROLES : WRITE_ROLES;
+		if (!member || roles[member.role] !== true) {
+			throw new TlonError('FORBIDDEN', 'principal may not access this project', { projectId });
+		}
+	}
 	return project;
+}
+
+/** Actions that need no project (create/import) are gated by the matrix alone. */
+export function assertAllowed(principal: Principal, action: GatewayAction): void {
+	if (!isActionAllowed(principal, action)) {
+		throw new TlonError('FORBIDDEN', 'principal may not perform this action');
+	}
 }
 
 /** Audit row for a mutation. Metadata: IDs and counts only, never titles or bodies. */
@@ -105,6 +132,29 @@ export async function audit(
 		operation,
 		subjectId,
 		outcome: 'SUCCESS',
+		metadata,
+		createdAt: ctx.now()
+	});
+}
+
+/** Audit row for a gateway decision that was refused (denied or hidden). IDs only. */
+export async function auditDecision(
+	ctx: Ctx,
+	q: Db,
+	actorId: string,
+	projectId: string | null,
+	operation: string,
+	subjectId: string | null,
+	outcome: 'DENIED' | 'HIDDEN' | 'UNAUTHENTICATED',
+	metadata: Record<string, unknown> = {}
+): Promise<void> {
+	await q.insert(auditEvents).values({
+		id: ctx.newId(),
+		projectId,
+		actorId,
+		operation,
+		subjectId,
+		outcome,
 		metadata,
 		createdAt: ctx.now()
 	});

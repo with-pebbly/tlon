@@ -8,9 +8,12 @@ import {
 	type Principal,
 	type ArtifactRevision,
 	UpdateArtifactInput,
-	type RevisionList
+	type OwnerScope,
+	type RevisionList,
+	type Role
 } from '@tlon/contracts';
 import { parseStructured } from '@tlon/contracts';
+import { creationScopeFor, writableScopesFor } from '@tlon/core';
 import { and, asc, desc, eq, gt, ilike, inArray, or } from 'drizzle-orm';
 
 import type { Db } from './db.ts';
@@ -95,7 +98,9 @@ export async function insertArtifact(
 		ArtifactRow,
 		'kind' | 'title' | 'body' | 'structured' | 'status' | 'ownerScope' | 'locked' | 'pinned'
 	>,
-	reason: string | null
+	reason: string | null,
+	/** Override for artifacts authored on behalf of another role (e.g. a published disclosure is C's). */
+	creatorRole: Role = principal.role
 ): Promise<Artifact> {
 	const now = ctx.now();
 	const id = ctx.newId();
@@ -106,7 +111,7 @@ export async function insertArtifact(
 			...values,
 			id,
 			projectId,
-			creatorRole: principal.role,
+			creatorRole,
 			headRevisionId: revisionId,
 			createdAt: now,
 			updatedAt: now
@@ -127,7 +132,7 @@ export async function insertArtifact(
 
 const escapeLike = (value: string) => value.replace(/[\\%_]/g, (c) => `\\${c}`);
 
-function decodeCursor(cursor: string): { at: Date; id: string } {
+export function decodeCursor(cursor: string): { at: Date; id: string } {
 	const [ms, id] = cursor.split('_');
 	const at = new Date(Number(ms));
 	if (!ms || !id || Number.isNaN(at.getTime()) || !/^[0-9a-f-]{36}$/.test(id)) {
@@ -144,8 +149,8 @@ export function artifactMethods(ctx: Ctx) {
 			projectId: string,
 			query: unknown = {}
 		): Promise<ArtifactPage> {
+			await authorize(db, principal, projectId, 'project.read');
 			const q = parseInput(ArtifactListQuery, query);
-			await authorize(db, principal, projectId, 'read');
 			const filters = [
 				q.kind ? eq(artifacts.kind, q.kind) : undefined,
 				q.status ? eq(artifacts.status, q.status) : undefined,
@@ -162,7 +167,7 @@ export function artifactMethods(ctx: Ctx) {
 					or(gt(artifacts.createdAt, at), and(eq(artifacts.createdAt, at), gt(artifacts.id, id)))
 				);
 			}
-			const items = await selectArtifacts(db, principal, projectId, and(...filters), {
+			const items = await selectArtifacts(ctx, db, principal, projectId, and(...filters), {
 				limit: q.limit + 1
 			});
 			const page = items.slice(0, q.limit);
@@ -179,9 +184,20 @@ export function artifactMethods(ctx: Ctx) {
 			projectId: string,
 			input: unknown
 		): Promise<Artifact> {
-			const data = parseInput(CreateArtifactInput, input);
 			return db.transaction(async (tx) => {
-				const project = await authorize(tx, principal, projectId, 'write');
+				const project = await authorize(tx, principal, projectId, 'artifact.create');
+				const data = parseInput(CreateArtifactInput, input);
+				// Agents are pinned to their own scope (a forged ownerScope is ignored) and cannot
+				// self-accept or lock; VALIDATOR has no creation scope at all.
+				const ownerScope = creationScopeFor(principal, data.ownerScope);
+				if (ownerScope === null) {
+					throw new TlonError('FORBIDDEN', 'principal may not create artifacts', { projectId });
+				}
+				if (principal.kind === 'AGENT' && (data.status === 'ACCEPTED' || data.locked)) {
+					throw new TlonError('FORBIDDEN', 'agents may not accept or lock artifacts', {
+						projectId
+					});
+				}
 				const structured = guardValidation(() =>
 					parseStructured(project.domain as 'NARRATIVE' | 'GENERIC', data.kind, data.structured)
 				);
@@ -196,7 +212,7 @@ export function artifactMethods(ctx: Ctx) {
 						body: data.body,
 						structured,
 						status: data.status,
-						ownerScope: data.ownerScope,
+						ownerScope,
 						locked: data.locked,
 						pinned: data.pinned
 					},
@@ -210,9 +226,9 @@ export function artifactMethods(ctx: Ctx) {
 		},
 
 		async getArtifact(principal: Principal, projectId: string, id: string): Promise<Artifact> {
-			await authorize(db, principal, projectId, 'read');
+			await authorize(db, principal, projectId, 'project.read');
 			asUuid(id, 'ARTIFACT_NOT_FOUND');
-			const { row, version } = await getArtifactRow(db, principal, projectId, id);
+			const { row, version } = await getArtifactRow(ctx, db, principal, projectId, id);
 			return toArtifact(row, version);
 		},
 
@@ -223,23 +239,41 @@ export function artifactMethods(ctx: Ctx) {
 			expectedRevisionId: string | undefined,
 			input: unknown
 		): Promise<Artifact> {
-			if (expectedRevisionId === undefined || expectedRevisionId === '') {
-				throw new TlonError(
-					'PRECONDITION_REQUIRED',
-					'If-Match with the head revision id is required'
-				);
-			}
-			const patch = parseInput(UpdateArtifactInput, input);
 			return db.transaction(async (tx) => {
-				const project = await authorize(tx, principal, projectId, 'write');
+				const project = await authorize(tx, principal, projectId, 'artifact.create');
+				if (expectedRevisionId === undefined || expectedRevisionId === '') {
+					throw new TlonError(
+						'PRECONDITION_REQUIRED',
+						'If-Match with the head revision id is required'
+					);
+				}
+				const patch = parseInput(UpdateArtifactInput, input);
 				asUuid(id, 'ARTIFACT_NOT_FOUND');
-				const current = await getArtifactRow(tx, principal, projectId, id);
+				// Invisible → ARTIFACT_NOT_FOUND; visible but outside the writable scopes → FORBIDDEN.
+				const current = await getArtifactRow(ctx, tx, principal, projectId, id);
+				if (!writableScopesFor(principal).includes(current.row.ownerScope as OwnerScope)) {
+					throw new TlonError('FORBIDDEN', 'artifact is read-only for this principal', {
+						artifactId: id
+					});
+				}
 				if (current.row.headRevisionId !== expectedRevisionId) {
 					throw new TlonError('STALE_REVISION', 'artifact changed since the expected revision', {
 						currentRevisionId: current.row.headRevisionId
 					});
 				}
 				const { reason, ...fields } = patch;
+				if (
+					principal.kind === 'AGENT' &&
+					(fields.ownerScope !== undefined ||
+						fields.locked !== undefined ||
+						fields.status === 'ACCEPTED')
+				) {
+					throw new TlonError(
+						'FORBIDDEN',
+						'agents may not change scope or lock state, or accept artifacts',
+						{ artifactId: id }
+					);
+				}
 				const changedKeys = Object.keys(fields).filter(
 					(k) => fields[k as keyof typeof fields] !== undefined
 				);
@@ -316,9 +350,9 @@ export function artifactMethods(ctx: Ctx) {
 			projectId: string,
 			id: string
 		): Promise<RevisionList> {
-			await authorize(db, principal, projectId, 'read');
+			await authorize(db, principal, projectId, 'project.read');
 			asUuid(id, 'ARTIFACT_NOT_FOUND');
-			await getArtifactRow(db, principal, projectId, id);
+			await getArtifactRow(ctx, db, principal, projectId, id);
 			const rows = await db
 				.select()
 				.from(artifactRevisions)

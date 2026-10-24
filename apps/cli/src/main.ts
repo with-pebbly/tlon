@@ -160,6 +160,59 @@ program
 		})
 	);
 
+const agent = program
+	.command('agent')
+	.description('manage agent principals and tokens (human only)');
+
+agent
+	.command('create')
+	.argument('<projectId>')
+	.argument('<role>', 'A | B | C | VALIDATOR')
+	.argument('<name>')
+	.description('create an agent principal bound to a project and print its id')
+	.action(
+		action(async (projectId: string, role: string, name: string) => {
+			const created = await withService((service) =>
+				service.createAgent(principal, projectId, { role, name })
+			);
+			out(created.id);
+		})
+	);
+
+agent
+	.command('list')
+	.argument('<projectId>')
+	.description('list the agent principals of a project')
+	.action(
+		action(async (projectId: string) => {
+			const { items } = await withService((service) => service.listAgents(principal, projectId));
+			for (const a of items) {
+				out([a.id, a.role, a.name, a.disabledAt ? 'disabled' : 'active'].join('  '));
+			}
+		})
+	);
+
+agent
+	.command('token')
+	.argument('<projectId>')
+	.argument('<principalId>')
+	.option('--ttl <seconds>', 'token lifetime in seconds (60..86400, default 3600)')
+	.description('issue a bearer token (printed once; only its hash is stored)')
+	.action(
+		action(async (projectId: string, principalId: string, options: { ttl?: string }) => {
+			const issued = await withService((service) =>
+				service.issueToken(
+					principal,
+					projectId,
+					principalId,
+					options.ttl === undefined ? {} : { ttlSeconds: Number(options.ttl) }
+				)
+			);
+			out(issued.token);
+			process.stderr.write(`expires ${issued.expiresAt}; the token is not shown again\n`);
+		})
+	);
+
 async function readBundle(file: string): Promise<unknown> {
 	const text = await readFile(file, 'utf8').catch(() => {
 		throw new TlonError('VALIDATION_FAILED', `cannot read file ${file}`);

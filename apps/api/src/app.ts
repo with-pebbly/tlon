@@ -10,22 +10,53 @@ import {
 import type { TlonService } from '@tlon/store';
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyRequest } from 'fastify';
 
+/** Structural stand-in for pino's DestinationStream (pino is not a direct dependency). */
+export type LogStream = { write(message: string): void };
+
 export type BuildAppOptions = {
 	service: TlonService;
-	/** `true` enables info-level logging; objects are passed to pino. Request bodies are never logged. */
-	logger?: boolean | { level: string };
+	/**
+	 * `true` enables info-level logging; objects are passed to pino (`stream` redirects the
+	 * output, e.g. to capture logs in tests). Request bodies, headers and query strings are never logged.
+	 */
+	logger?: boolean | { level: string; stream?: LogStream };
 };
 
 /** Matches the 20 MB import limit in the API spec. */
 const BODY_LIMIT_BYTES = 20 * 1024 * 1024;
 
+/** Only the TCP peer counts: `X-Forwarded-For` and friends are attacker-controlled and ignored. */
+const LOOPBACK_ADDRESSES: readonly string[] = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
+
+export function isLoopbackAddress(address: string | undefined): boolean {
+	return address !== undefined && LOOPBACK_ADDRESSES.includes(address);
+}
+
+const BEARER = /^Bearer[ \t]+(\S+)$/i;
+
 /**
- * The single place a request becomes a principal.
- * TODO(M3 authenticated principals): resolve a bearer token / agent grant here instead of
- * returning the implicit local human. Nothing else in the API may decide who is acting.
+ * The single place a request becomes a principal (spec §1). `Authorization: Bearer tlon_…`
+ * is resolved through the service (unexpired, unrevoked, principal enabled); a present but
+ * unusable credential is UNAUTHENTICATED and never falls back to the human. Without the
+ * header the implicit local human applies only to loopback TCP peers. Nothing in the body,
+ * query or other headers can influence who is acting.
  */
-export function resolvePrincipal(_request: FastifyRequest): Principal {
-	return LOCAL_HUMAN;
+export async function resolvePrincipal(
+	service: TlonService,
+	request: FastifyRequest
+): Promise<Principal> {
+	const header = request.headers.authorization;
+	if (header !== undefined) {
+		const token = BEARER.exec(header.trim())?.[1];
+		if (token === undefined) {
+			await service.recordUnauthenticated('malformed_credentials');
+			throw new TlonError('UNAUTHENTICATED', 'invalid or expired credentials');
+		}
+		return service.authenticateToken(token);
+	}
+	if (isLoopbackAddress(request.socket.remoteAddress)) return LOCAL_HUMAN;
+	await service.recordUnauthenticated('no_credentials');
+	throw new TlonError('UNAUTHENTICATED', 'authentication required');
 }
 
 function headerValue(request: FastifyRequest, name: string): string | undefined {
@@ -52,6 +83,9 @@ function loggerConfig(logger: BuildAppOptions['logger']) {
 	if (!logger) return false;
 	return {
 		level: typeof logger === 'object' ? logger.level : 'info',
+		...(typeof logger === 'object' && logger.stream ? { stream: logger.stream } : {}),
+		// Defence in depth: the req serializer already drops headers; never let a credential through.
+		redact: { paths: ['req.headers.authorization', 'headers.authorization'], censor: '[redacted]' },
 		serializers: {
 			// Method + path only: no query string, headers or body.
 			req: (req: { method?: string; url?: string }) => ({
@@ -64,9 +98,13 @@ function loggerConfig(logger: BuildAppOptions['logger']) {
 
 type ProjectParams = { Params: { projectId: string } };
 type ItemParams = { Params: { projectId: string; id: string } };
+type AgentParams = { Params: { projectId: string; principalId: string } };
+type TokenParams = { Params: { projectId: string; principalId: string; tokenId: string } };
+type GrantParams = { Params: { projectId: string; grantId: string } };
 
 export function buildApp({ service, logger }: BuildAppOptions): FastifyInstance {
 	const app = Fastify({ logger: loggerConfig(logger), bodyLimit: BODY_LIMIT_BYTES });
+	const act = (request: FastifyRequest) => resolvePrincipal(service, request);
 
 	// Empty bodies are valid (e.g. cancelling an expansion); malformed JSON is a typed validation error.
 	app.addContentTypeParser('application/json', { parseAs: 'string' }, (_request, body, done) => {
@@ -116,15 +154,15 @@ export function buildApp({ service, logger }: BuildAppOptions): FastifyInstance 
 
 	app.get(`${prefix}/health`, async () => ({ ok: true }));
 
-	app.get(`${prefix}/projects`, async (request) => service.listProjects(resolvePrincipal(request)));
+	app.get(`${prefix}/projects`, async (request) => service.listProjects(await act(request)));
 	app.post(`${prefix}/projects`, async (request, reply) => {
-		const created = await service.createProject(resolvePrincipal(request), request.body);
+		const created = await service.createProject(await act(request), request.body);
 		return reply.code(201).send(created);
 	});
 	app.post<{ Querystring: { name?: string; remapIds?: string } }>(
 		`${prefix}/projects/import`,
 		async (request, reply) => {
-			const result = await service.importAsNewProject(resolvePrincipal(request), request.body, {
+			const result = await service.importAsNewProject(await act(request), request.body, {
 				name: request.query.name,
 				remapIds: request.query.remapIds
 			});
@@ -132,29 +170,29 @@ export function buildApp({ service, logger }: BuildAppOptions): FastifyInstance 
 		}
 	);
 	app.get<ProjectParams>(project, async (request) =>
-		service.getProject(resolvePrincipal(request), request.params.projectId)
+		service.getProject(await act(request), request.params.projectId)
 	);
 	app.get<ProjectParams>(`${project}/graph`, async (request) =>
-		service.getGraph(resolvePrincipal(request), request.params.projectId)
+		service.getGraph(await act(request), request.params.projectId)
 	);
 
 	app.get<ProjectParams>(`${project}/artifacts`, async (request) =>
-		service.listArtifacts(resolvePrincipal(request), request.params.projectId, request.query)
+		service.listArtifacts(await act(request), request.params.projectId, request.query)
 	);
 	app.post<ProjectParams>(`${project}/artifacts`, async (request, reply) => {
 		const created = await service.createArtifact(
-			resolvePrincipal(request),
+			await act(request),
 			request.params.projectId,
 			request.body
 		);
 		return reply.code(201).send(created);
 	});
 	app.get<ItemParams>(`${project}/artifacts/:id`, async (request) =>
-		service.getArtifact(resolvePrincipal(request), request.params.projectId, request.params.id)
+		service.getArtifact(await act(request), request.params.projectId, request.params.id)
 	);
 	app.patch<ItemParams>(`${project}/artifacts/:id`, async (request) =>
 		service.updateArtifact(
-			resolvePrincipal(request),
+			await act(request),
 			request.params.projectId,
 			request.params.id,
 			ifMatch(request),
@@ -162,12 +200,12 @@ export function buildApp({ service, logger }: BuildAppOptions): FastifyInstance 
 		)
 	);
 	app.get<ItemParams>(`${project}/artifacts/:id/revisions`, async (request) =>
-		service.listRevisions(resolvePrincipal(request), request.params.projectId, request.params.id)
+		service.listRevisions(await act(request), request.params.projectId, request.params.id)
 	);
 
 	app.post<ProjectParams>(`${project}/relations`, async (request, reply) => {
 		const created = await service.createRelation(
-			resolvePrincipal(request),
+			await act(request),
 			request.params.projectId,
 			request.body
 		);
@@ -175,7 +213,7 @@ export function buildApp({ service, logger }: BuildAppOptions): FastifyInstance 
 	});
 	app.patch<ItemParams>(`${project}/relations/:id`, async (request) =>
 		service.updateRelation(
-			resolvePrincipal(request),
+			await act(request),
 			request.params.projectId,
 			request.params.id,
 			request.body
@@ -184,18 +222,18 @@ export function buildApp({ service, logger }: BuildAppOptions): FastifyInstance 
 
 	app.post<ProjectParams>(`${project}/expansions`, async (request, reply) => {
 		const created = await service.createExpansion(
-			resolvePrincipal(request),
+			await act(request),
 			request.params.projectId,
 			request.body
 		);
 		return reply.code(201).send(created);
 	});
 	app.get<ItemParams>(`${project}/expansions/:id`, async (request) =>
-		service.getExpansion(resolvePrincipal(request), request.params.projectId, request.params.id)
+		service.getExpansion(await act(request), request.params.projectId, request.params.id)
 	);
 	app.post<ItemParams>(`${project}/expansions/:id/candidates`, async (request, reply) => {
 		const updated = await service.submitCandidate(
-			resolvePrincipal(request),
+			await act(request),
 			request.params.projectId,
 			request.params.id,
 			request.body
@@ -204,7 +242,7 @@ export function buildApp({ service, logger }: BuildAppOptions): FastifyInstance 
 	});
 	app.post<ItemParams>(`${project}/expansions/:id/accept`, async (request) =>
 		service.acceptExpansion(
-			resolvePrincipal(request),
+			await act(request),
 			request.params.projectId,
 			request.params.id,
 			headerValue(request, IDEMPOTENCY_KEY_HEADER),
@@ -213,7 +251,7 @@ export function buildApp({ service, logger }: BuildAppOptions): FastifyInstance 
 	);
 	app.post<ItemParams>(`${project}/expansions/:id/reject`, async (request) =>
 		service.rejectExpansion(
-			resolvePrincipal(request),
+			await act(request),
 			request.params.projectId,
 			request.params.id,
 			request.body ?? {}
@@ -221,7 +259,7 @@ export function buildApp({ service, logger }: BuildAppOptions): FastifyInstance 
 	);
 
 	app.get<ProjectParams>(`${project}/export`, async (request, reply) => {
-		const bundle = await service.exportProject(resolvePrincipal(request), request.params.projectId);
+		const bundle = await service.exportProject(await act(request), request.params.projectId);
 		return reply
 			.header(
 				'content-disposition',
@@ -233,13 +271,90 @@ export function buildApp({ service, logger }: BuildAppOptions): FastifyInstance 
 		`${project}/import`,
 		async (request, reply) => {
 			const result = await service.importProject(
-				resolvePrincipal(request),
+				await act(request),
 				request.params.projectId,
 				request.body,
 				{ remapIds: request.query.remapIds }
 			);
 			return reply.code(201).send(result);
 		}
+	);
+
+	app.get(`${prefix}/whoami`, async (request) => service.whoami(await act(request)));
+
+	app.get<ProjectParams>(`${project}/agents`, async (request) =>
+		service.listAgents(await act(request), request.params.projectId)
+	);
+	app.post<ProjectParams>(`${project}/agents`, async (request, reply) => {
+		const created = await service.createAgent(
+			await act(request),
+			request.params.projectId,
+			request.body
+		);
+		return reply.code(201).send(created);
+	});
+	app.post<AgentParams>(`${project}/agents/:principalId/disable`, async (request) =>
+		service.disableAgent(await act(request), request.params.projectId, request.params.principalId)
+	);
+	app.post<AgentParams>(`${project}/agents/:principalId/tokens`, async (request, reply) => {
+		const issued = await service.issueToken(
+			await act(request),
+			request.params.projectId,
+			request.params.principalId,
+			request.body ?? {}
+		);
+		return reply.code(201).send(issued);
+	});
+	app.post<TokenParams>(
+		`${project}/agents/:principalId/tokens/:tokenId/revoke`,
+		async (request, reply) => {
+			await service.revokeToken(
+				await act(request),
+				request.params.projectId,
+				request.params.principalId,
+				request.params.tokenId
+			);
+			return reply.code(204).send();
+		}
+	);
+
+	app.get<ProjectParams>(`${project}/grants`, async (request) =>
+		service.listGrants(await act(request), request.params.projectId)
+	);
+	app.post<ProjectParams>(`${project}/grants`, async (request, reply) => {
+		const created = await service.createGrant(
+			await act(request),
+			request.params.projectId,
+			request.body
+		);
+		return reply.code(201).send(created);
+	});
+	app.post<GrantParams>(`${project}/grants/:grantId/revoke`, async (request) =>
+		service.revokeGrant(await act(request), request.params.projectId, request.params.grantId)
+	);
+
+	app.get<ProjectParams>(`${project}/disclosures`, async (request) =>
+		service.listDisclosures(await act(request), request.params.projectId)
+	);
+	app.post<ProjectParams>(`${project}/disclosures`, async (request, reply) => {
+		const created = await service.proposeDisclosure(
+			await act(request),
+			request.params.projectId,
+			request.body
+		);
+		return reply.code(201).send(created);
+	});
+	app.post<ItemParams>(`${project}/disclosures/:id/review`, async (request) =>
+		service.reviewDisclosure(
+			await act(request),
+			request.params.projectId,
+			request.params.id,
+			request.body ?? {}
+		)
+	);
+
+	app.get<ProjectParams>(`${project}/audit/own`, async (request) =>
+		service.listOwnAudit(await act(request), request.params.projectId, request.query)
 	);
 
 	return app;

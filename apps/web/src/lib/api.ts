@@ -25,7 +25,20 @@ import {
 	type RevisionList,
 	type SubmitCandidateInput,
 	type UpdateArtifactInput,
-	type UpdateRelationInput
+	type UpdateRelationInput,
+	type AgentList,
+	type AgentPrincipal,
+	type AuditPage,
+	type CreateAgentInput,
+	type Disclosure,
+	type DisclosureList,
+	type Grant,
+	type GrantList,
+	type IssuedToken,
+	type IssueTokenInput,
+	type ProposeDisclosureInput,
+	type ReviewDisclosureInput,
+	type WhoAmI
 } from '@tlon/contracts';
 
 /** Client-side codes for failures that never reached a well-formed API error body. */
@@ -190,5 +203,49 @@ export const api = {
 			method: 'POST',
 			body: bundle,
 			query: { name: options.name, remapIds: options.remapIds }
-		})
+		}),
+
+	// ── Artifact Gateway (M3) ───────────────────────────────────────────────────
+
+	whoami: () => request<WhoAmI>('/whoami'),
+
+	listAgents: (projectId: string) => request<AgentList>(`${p(projectId)}/agents`),
+	createAgent: (projectId: string, input: CreateAgentInput) =>
+		request<AgentPrincipal>(`${p(projectId)}/agents`, { method: 'POST', body: input }),
+	/** Disables the principal and revokes every token it holds. */
+	disableAgent: (projectId: string, principalId: string) =>
+		request<AgentPrincipal>(`${p(projectId)}/agents/${id(principalId)}/disable`, {
+			method: 'POST'
+		}),
+	/** The plaintext `token` is returned exactly once; the server keeps only its hash. */
+	issueToken: (projectId: string, principalId: string, input: IssueTokenInput = {}) =>
+		request<IssuedToken>(`${p(projectId)}/agents/${id(principalId)}/tokens`, {
+			method: 'POST',
+			body: input
+		}),
+	revokeToken: (projectId: string, principalId: string, tokenId: string) =>
+		request<undefined>(`${p(projectId)}/agents/${id(principalId)}/tokens/${id(tokenId)}/revoke`, {
+			method: 'POST'
+		}),
+
+	listGrants: (projectId: string) => request<GrantList>(`${p(projectId)}/grants`),
+	createGrant: (
+		projectId: string,
+		input: { granteePrincipalId: string; artifactId: string; expiresAt?: string }
+	) => request<Grant>(`${p(projectId)}/grants`, { method: 'POST', body: input }),
+	revokeGrant: (projectId: string, grantId: string) =>
+		request<Grant>(`${p(projectId)}/grants/${id(grantId)}/revoke`, { method: 'POST' }),
+
+	listDisclosures: (projectId: string) => request<DisclosureList>(`${p(projectId)}/disclosures`),
+	/** Role C only; the web UI (HUMAN) never proposes, it is here for API completeness. */
+	proposeDisclosure: (projectId: string, input: ProposeDisclosureInput) =>
+		request<Disclosure>(`${p(projectId)}/disclosures`, { method: 'POST', body: input }),
+	reviewDisclosure: (projectId: string, disclosureId: string, input: ReviewDisclosureInput) =>
+		request<Disclosure>(`${p(projectId)}/disclosures/${id(disclosureId)}/review`, {
+			method: 'POST',
+			body: input
+		}),
+
+	listOwnAudit: (projectId: string, query: { cursor?: string; limit?: number } = {}) =>
+		request<AuditPage>(`${p(projectId)}/audit/own`, { query })
 };

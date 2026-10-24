@@ -3,6 +3,7 @@ import { resolve } from '$app/paths';
 import { page } from '$app/state';
 import { api, ApiError, isApiError } from '$lib/api';
 import {
+	LOCAL_HUMAN,
 	OPEN_EXPANSION_STATUSES,
 	type AcceptExpansionInput,
 	type AcceptExpansionResult,
@@ -18,7 +19,13 @@ import {
 	type Relation,
 	type SubmitCandidateInput,
 	type UpdateArtifactInput,
-	type UpdateRelationInput
+	type UpdateRelationInput,
+	type AgentPrincipal,
+	type CreateAgentInput,
+	type Disclosure,
+	type Grant,
+	type IssuedToken,
+	type ReviewDisclosureInput
 } from '@tlon/contracts';
 import { buildFractalTree, buildTimeline, detectTensions } from '@tlon/core';
 import { SvelteSet } from 'svelte/reactivity';
@@ -93,6 +100,15 @@ export class Workspace {
 	focusRequest = $state.raw<{ artifactId: string; at: number } | null>(null);
 	newArtifactOpen = $state(false);
 
+	/** Artifact Gateway admin data (HUMAN only); loaded separately from the graph. */
+	agents = $state.raw<AgentPrincipal[]>([]);
+	grants = $state.raw<Grant[]>([]);
+	disclosures = $state.raw<Disclosure[]>([]);
+	gatewayError = $state.raw<ApiError | null>(null);
+	gatewayLoading = $state(false);
+	/** Open gateway modal: agent admin (+ grants) or the disclosure review queue. */
+	gatewayPanel = $state<'agents' | 'disclosures' | null>(null);
+
 	/** Idempotency keys for accept requests not yet confirmed by the server. */
 	#acceptKeys = new Map<string, string>();
 
@@ -146,6 +162,17 @@ export class Workspace {
 	artifactsById = $derived(new Map(this.artifacts.map((a) => [a.id, a])));
 	relationsById = $derived(new Map(this.relations.map((r) => [r.id, r])));
 	expansionsById = $derived(new Map(this.expansions.map((e) => [e.id, e])));
+
+	agentsById = $derived(new Map(this.agents.map((a) => [a.id, a])));
+	pendingDisclosures = $derived(this.disclosures.filter((d) => d.status === 'PENDING'));
+	/** Published disclosure that produced a given C_SHARED artifact (its provenance). */
+	disclosureBySharedArtifact = $derived(
+		new Map(
+			this.disclosures
+				.filter((d) => d.sharedArtifactId !== null)
+				.map((d) => [d.sharedArtifactId as string, d])
+		)
+	);
 
 	candidatesByExpansion = $derived.by(() => {
 		const map = new Map<string, ExpansionCandidate[]>();
@@ -301,6 +328,13 @@ export class Workspace {
 		return this.artifactsById.get(artifactId)?.title ?? artifactId.slice(0, 8);
 	}
 
+	/** "A · scout" for agent principals; the raw id (shortened) for anything else. */
+	principalLabel(principalId: string): string {
+		const agent = this.agentsById.get(principalId);
+		if (agent) return `${agent.role} · ${agent.name}`;
+		return principalId === LOCAL_HUMAN.id ? 'human' : principalId.slice(0, 8);
+	}
+
 	// ── Loading ─────────────────────────────────────────────────────────────────
 
 	async reload() {
@@ -323,6 +357,41 @@ export class Workspace {
 		try {
 			const result = await action();
 			await this.reload();
+			return result;
+		} finally {
+			this.pending--;
+		}
+	}
+
+	/** Agents, grants and disclosures in one round; the graph is unaffected. */
+	async reloadGateway() {
+		this.gatewayLoading = true;
+		try {
+			const [agents, grants, disclosures] = await Promise.all([
+				api.listAgents(this.projectId),
+				api.listGrants(this.projectId),
+				api.listDisclosures(this.projectId)
+			]);
+			this.agents = agents.items;
+			this.grants = grants.items;
+			this.disclosures = disclosures.items;
+			this.gatewayError = null;
+		} catch (error) {
+			this.gatewayError = isApiError(error)
+				? error
+				: new ApiError('BAD_RESPONSE', 0, String(error));
+			throw error;
+		} finally {
+			this.gatewayLoading = false;
+		}
+	}
+
+	/** Runs a gateway admin mutation, then re-fetches the gateway lists. */
+	async #mutateGateway<T>(action: () => Promise<T>): Promise<T> {
+		this.pending++;
+		try {
+			const result = await action();
+			await this.reloadGateway();
 			return result;
 		} finally {
 			this.pending--;
@@ -408,6 +477,44 @@ export class Workspace {
 				...(reason ? { reason } : {})
 			})
 		);
+	}
+
+	// ── Artifact Gateway admin (HUMAN) ──────────────────────────────────────────
+
+	createAgent(input: CreateAgentInput): Promise<AgentPrincipal> {
+		return this.#mutateGateway(() => api.createAgent(this.projectId, input));
+	}
+
+	/** Disabling revokes every token of the principal (there is no token list endpoint). */
+	disableAgent(principalId: string): Promise<AgentPrincipal> {
+		return this.#mutateGateway(() => api.disableAgent(this.projectId, principalId));
+	}
+
+	/** The returned plaintext token is never stored in workspace state. */
+	async issueToken(principalId: string, ttlSeconds: number): Promise<IssuedToken> {
+		this.pending++;
+		try {
+			return await api.issueToken(this.projectId, principalId, { ttlSeconds });
+		} finally {
+			this.pending--;
+		}
+	}
+
+	revokeToken(principalId: string, tokenId: string): Promise<undefined> {
+		return this.#mutateGateway(() => api.revokeToken(this.projectId, principalId, tokenId));
+	}
+
+	revokeGrant(grantId: string): Promise<Grant> {
+		return this.#mutateGateway(() => api.revokeGrant(this.projectId, grantId));
+	}
+
+	/** PUBLISH creates a new C_SHARED artifact, so the graph is re-fetched as well. */
+	async reviewDisclosure(disclosureId: string, input: ReviewDisclosureInput): Promise<Disclosure> {
+		const disclosure = await this.#mutateGateway(() =>
+			api.reviewDisclosure(this.projectId, disclosureId, input)
+		);
+		if (disclosure.sharedArtifactId !== null) await this.reload();
+		return disclosure;
 	}
 
 	// ── UI-only actions ─────────────────────────────────────────────────────────
