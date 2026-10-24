@@ -18,12 +18,16 @@
 - Tool surface follows §7.4: `artifact_list_visible`, `artifact_create`,
   `relation_propose` for A/B; C additionally gets `expansion_propose`,
   `expansion_submit_candidate`, `disclosure_publish`.
-- **Run policy: one recursive tree.** A writes the opening, B the ending (in parallel,
-  isolated). C then bridges the A→B seam and, round after round, every open child
-  interval level by level up to `--max-depth` (default 5, ≤ 31 bridges), until the
-  scenario reaches `--target` blocks (default 30). Intervals inside an author's own
-  chain are not bridged, so the result is one fractal rather than a line of small
-  triangles. Finally C briefs A and B through disclosures.
+- **Run policy: adaptive pyramids** (revised after the screenwriter review, ADR 0010).
+  A writes the opening, B the ending (in parallel, isolated). C bridges the A→B seam
+  and every link inside each author's chain, level by level, each interval becoming its
+  own pyramid. A tree must be bridged down to a minimum depth (`--min-depth` 3 for the
+  seam, `--chain-min-depth` 2 for chains); below it C either bridges or calls
+  `interval_stop` ("sufficient detail"), up to `--max-depth` 5 and around `--target`
+  blocks. Candidates carry state contracts; ones refused by the continuity gate are
+  rejected and resubmitted once with the findings. Finally C briefs A and B through
+  disclosures. (The first slice bridged only one seam tree to full depth; the review
+  found its depth-4/5 beats redundant and one continuity break.)
 - **Approval.** By default the orchestrator accepts each bridge and publishes each
   disclosure as the operator, with an explicit `reason` recorded in the revision and
   audit trail; `--review` stops after C's first proposals for human review instead.

@@ -16,7 +16,8 @@
  *   end. C briefs A and B through disclosures; the operator publishes them.
  *
  * Usage: bun packages/agents/src/run.ts --premise "..." [--target 30] [--rounds 8]
- *        [--bridges-per-round 8] [--max-depth 5] [--project <id>] [--review]
+ *        [--bridges-per-round 8] [--max-depth 5] [--min-depth 3] [--chain-min-depth 2]
+ *        [--project <id>] [--review]
  *        TLON_AGENT_MODEL=<pattern> selects the model.
  */
 import { randomUUID } from 'node:crypto';
@@ -57,8 +58,10 @@ const { values } = parseArgs({
 		project: { type: 'string' },
 		target: { type: 'string', default: '30' },
 		rounds: { type: 'string', default: '8' },
-		'bridges-per-round': { type: 'string', default: '8' },
+		'bridges-per-round': { type: 'string', default: '10' },
 		'max-depth': { type: 'string', default: '5' },
+		'min-depth': { type: 'string', default: '3' },
+		'chain-min-depth': { type: 'string', default: '2' },
 		review: { type: 'boolean', default: false },
 		api: { type: 'string', default: process.env.TLON_API_URL ?? 'http://127.0.0.1:3001' }
 	}
@@ -70,6 +73,8 @@ const target = Number(values.target);
 const maxRounds = Number(values.rounds);
 const bridgesPerRound = Number(values['bridges-per-round']);
 const maxDepth = Number(values['max-depth']);
+const seamMinDepth = Number(values['min-depth']);
+const chainMinDepth = Number(values['chain-min-depth']);
 
 class OperatorError extends Error {
 	readonly code: string;
@@ -128,6 +133,7 @@ const stopped = new Map<string, string>();
 async function runAgent(agent: Agent, projectId: string, prompt: string): Promise<string> {
 	const tools = toolsForRole(agent.role, new GatewayClient(api, projectId, agent.token), {
 		onStop: (relationId, reason) => {
+			// Recorded always; ignored by openIntervals while the interval is above its tree's min depth.
 			stopped.set(relationId, reason);
 			console.log(`[${agent.role}] ■ stop ${relationId.slice(0, 8)}: ${reason}`);
 		}
@@ -187,37 +193,54 @@ const graphOf = (projectId: string) =>
 const blocks = (g: ProjectGraph) =>
 	g.artifacts.filter((a) => a.status !== 'REJECTED' && a.status !== 'SUPERSEDED').length;
 
+type Interval = { relation: Relation; depth: number; minDepth: number; tree: 'seam' | 'chain' };
+
 /**
- * Unbridged intervals. Child intervals of accepted bridges come first, level by level,
- * so recursion fills out complete triangles before new root intervals are bridged.
+ * Unbridged intervals, shallowest first. Every root relation (the A→B seam and each
+ * link inside an author's chain) grows its own pyramid. A tree MUST be bridged down to
+ * its minimum depth (`--min-depth` for the seam, `--chain-min-depth` for chains); below
+ * that C may STOP an interval as sufficiently detailed, which gives uneven depth.
  */
-function openIntervals(g: ProjectGraph): Array<{ relation: Relation; depth: number }> {
-	const depthOf = new Map(g.expansions.map((e) => [e.id, e.depth]));
+function openIntervals(g: ProjectGraph): Interval[] {
+	const expansions = new Map(g.expansions.map((e) => [e.id, e]));
+	const relations = new Map(g.relations.map((r) => [r.id, r]));
+	const scopeOf = new Map(g.artifacts.map((a) => [a.id, a.ownerScope]));
 	const busy = new Set(
 		g.expansions
 			.filter((e) => ['PENDING', 'GENERATING', 'REVIEW', 'ACCEPTED'].includes(e.status))
 			.map((e) => e.targetRelationId)
 	);
-	return (
-		g.relations
-			.filter(
-				(r) =>
-					r.status !== 'REJECTED' &&
-					r.expandedByExpansionId === null &&
-					!busy.has(r.id) &&
-					!stopped.has(r.id)
-			)
-			.map((relation) => ({
-				relation,
-				depth: relation.expansionId === null ? 1 : (depthOf.get(relation.expansionId) ?? 0) + 1
-			}))
-			// Root intervals inside each author's chain stay unbridged: the scenario grows as
-			// ONE recursive tree on the A→B seam, level by level (complete triangles first).
-			.filter((i) => i.depth > 1 && i.depth <= maxDepth)
-			.toSorted(
-				(a, b) => a.depth - b.depth || a.relation.createdAt.localeCompare(b.relation.createdAt)
-			)
-	);
+	const rootOf = (r: Relation): Relation => {
+		let cursor = r;
+		for (let guard = 0; cursor.expansionId !== null && guard < 64; guard++) {
+			const e = expansions.get(cursor.expansionId);
+			const targetId = e?.targetRelationId;
+			const target = targetId ? relations.get(targetId) : undefined;
+			if (!target) break;
+			cursor = target;
+		}
+		return cursor;
+	};
+	return g.relations
+		.filter((r) => r.status !== 'REJECTED' && r.expandedByExpansionId === null && !busy.has(r.id))
+		.flatMap((relation): Interval[] => {
+			const depth =
+				relation.expansionId === null ? 1 : (expansions.get(relation.expansionId)?.depth ?? 0) + 1;
+			const root = rootOf(relation);
+			const tree = scopeOf.get(root.fromId) === scopeOf.get(root.toId) ? 'chain' : 'seam';
+			const minDepth = tree === 'seam' ? seamMinDepth : chainMinDepth;
+			// The seam root is opened by C from a pair; its child intervals start at depth 2.
+			if (tree === 'seam' && depth === 1) return [];
+			if (depth > maxDepth) return [];
+			if (stopped.has(relation.id) && depth > minDepth) return [];
+			return [{ relation, depth, minDepth, tree }];
+		})
+		.toSorted(
+			(a, b) =>
+				Number(a.tree === 'chain') - Number(b.tree === 'chain') ||
+				a.depth - b.depth ||
+				a.relation.createdAt.localeCompare(b.relation.createdAt)
+		);
 }
 
 function chainEnds(g: ProjectGraph, scope: 'A_PRIVATE' | 'B_PRIVATE') {
@@ -338,7 +361,7 @@ for (let round = 1; round <= maxRounds; round++) {
 			: []),
 		...intervals.map(
 			(i) =>
-				`- relationId=${i.relation.id} depth=${i.depth} ${i.relation.type}: "${titles.get(i.relation.fromId)}" → "${titles.get(i.relation.toId)}"`
+				`- ${i.depth <= i.minDepth ? 'MUST BRIDGE' : 'bridge or stop'} relationId=${i.relation.id} depth=${i.depth} ${i.relation.type}: "${titles.get(i.relation.fromId)}" → "${titles.get(i.relation.toId)}"`
 		)
 	];
 	if (tasks.length === 0) {
@@ -351,7 +374,7 @@ for (let round = 1; round <= maxRounds; round++) {
 		projectId,
 		[
 			`Premise: ${premise}`,
-			'For each interval below decide: BRIDGE it (one candidate with a full state contract) or STOP it with interval_stop when another beat would only restate motions, delay an established outcome or add no new causal information, character choice or reversal. Uneven depth is good pacing.',
+			`Budget: the scenario has ${blocks(g)} blocks and should reach about ${target}. Intervals marked MUST BRIDGE need a beat (the story is still too coarse there). For the others decide: BRIDGE (one candidate with a full state contract) or STOP with interval_stop when another beat would only restate motions, delay an established outcome or add no new causal information, character choice or reversal. Uneven depth is good pacing.`,
 			'Before bridging, call artifact_list_visible and read the `state` of both ends and of their neighbours: your preconditions must match what the left end leaves, your effects must leave what the right end requires, and you must not perform the right end’s own irreversible event.',
 			...tasks
 		].join('\n')

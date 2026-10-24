@@ -142,7 +142,7 @@ const AuthorCreateParams = z.object({
 });
 const StopParams = z.object({
 	relationId: z.string(),
-	reason: z.string().min(1).max(500)
+	reason: z.string().min(1).max(1500)
 });
 const DisclosureParams = z.object({
 	destinationPrincipalId: z.string(),
