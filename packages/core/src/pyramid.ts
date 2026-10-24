@@ -3,7 +3,8 @@ import type {
 	CompositeSummary,
 	Expansion,
 	ProjectGraph,
-	Relation
+	Relation,
+	Triangle
 } from '@tlon/contracts';
 
 type GraphLike = Pick<ProjectGraph, 'artifacts' | 'relations' | 'expansions'> & {
@@ -11,9 +12,72 @@ type GraphLike = Pick<ProjectGraph, 'artifacts' | 'relations' | 'expansions'> & 
 	composites?: readonly CompositeSummary[];
 	/** From `collapseComposites`: hidden member → visible collapsed composite. */
 	representative?: ReadonlyMap<string, string>;
+	/** Block–Fact triangles (ADR 0011): the Fact is drawn as the apex over its two anchors. */
+	triangles?: readonly Triangle[];
 };
 
 type OrderEdge = Pick<Relation, 'fromId' | 'toId' | 'expansionId' | 'status' | 'type'>;
+
+/**
+ * One subdivided interval, whichever mechanism produced it: a legacy expansion (apex =
+ * full-scene bridge Block) or a Block–Fact triangle (apex = minimal Fact, atemporal).
+ */
+type Gap = {
+	id: string;
+	source: 'expansion' | 'triangle';
+	open: boolean;
+	apexId: string | null;
+	candidateIds: readonly string[];
+	leftArtifactId: string;
+	rightArtifactId: string;
+	depth: number;
+	parentId: string | null;
+	createdAt: string;
+	stageIndex: number | null;
+};
+
+const OPEN_EXPANSION: Record<string, true> = { PENDING: true, GENERATING: true, REVIEW: true };
+const LIVE_TRIANGLE: Record<string, true> = {
+	proposed: true,
+	expanding: true,
+	converged: true,
+	validated: true
+};
+
+function gapsOf(expansions: readonly Expansion[], triangles: readonly Triangle[]): Gap[] {
+	return [
+		...expansions
+			.filter((e) => e.status === 'ACCEPTED' || OPEN_EXPANSION[e.status])
+			.map((e) => ({
+				id: e.id,
+				source: 'expansion' as const,
+				open: e.status !== 'ACCEPTED',
+				apexId: e.status === 'ACCEPTED' ? e.selectedBridgeArtifactId : null,
+				candidateIds: e.status === 'ACCEPTED' ? [] : e.bridgeArtifactIds,
+				leftArtifactId: e.leftArtifactId,
+				rightArtifactId: e.rightArtifactId,
+				depth: e.depth,
+				parentId: e.parentExpansionId,
+				createdAt: e.createdAt,
+				stageIndex: null
+			})),
+		...triangles
+			.filter((t) => LIVE_TRIANGLE[t.status])
+			.map((t) => ({
+				id: t.id,
+				source: 'triangle' as const,
+				open: t.fact === null,
+				apexId: t.fact?.artifactId ?? null,
+				candidateIds: [],
+				leftArtifactId: t.left.artifactId,
+				rightArtifactId: t.right.artifactId,
+				depth: t.depth,
+				parentId: t.parentTriangleId,
+				createdAt: t.createdAt,
+				stageIndex: t.stageIndex
+			}))
+	];
+}
 
 export type PyramidNode = {
 	artifactId: string;
@@ -21,14 +85,21 @@ export type PyramidNode = {
 	x: number;
 	/** Row above the base line: 0 = base sequence, higher = coarser bridge. */
 	y: number;
-	/** 'base' = authored sequence; 'bridge' = accepted bridge; 'candidate' = proposed, unaccepted. */
-	role: 'base' | 'bridge' | 'candidate';
-	/** Depth of the expansion that produced this node (0 for base). */
+	/**
+	 * 'base' = Block on the line; 'bridge' = accepted legacy full-scene bridge;
+	 * 'fact' = accepted triangle Fact (atemporal apex); 'candidate' = proposed, unaccepted.
+	 */
+	role: 'base' | 'bridge' | 'fact' | 'candidate';
+	/** Depth of the expansion/triangle that produced this node (0 for base). */
 	depth: number;
+	/** Generation stage of a triangle Fact (first C Fact = 2); null otherwise. */
+	stage: number | null;
 };
 
 export type PyramidTriangle = {
+	/** Expansion id (legacy bridge) or triangle id (Block–Fact). */
 	expansionId: string;
+	source: 'expansion' | 'triangle';
 	apexId: string;
 	leftId: string;
 	rightId: string;
@@ -98,14 +169,11 @@ export function layoutPyramid(graph: GraphLike): PyramidLayout {
 	const artifactsById = new Map(
 		graph.artifacts.filter((a) => !INACTIVE[a.status]).map((a) => [a.id, a])
 	);
-	const accepted = graph.expansions.filter(
-		(e) => e.status === 'ACCEPTED' && e.selectedBridgeArtifactId !== null
-	);
-	const open = graph.expansions.filter(
-		(e) => e.status === 'PENDING' || e.status === 'GENERATING' || e.status === 'REVIEW'
-	);
-	const bridgeIds = new Set(accepted.map((e) => e.selectedBridgeArtifactId as string));
-	const candidateIds = new Set(open.flatMap((e) => e.bridgeArtifactIds));
+	const gaps = gapsOf(graph.expansions, graph.triangles ?? []);
+	const accepted = gaps.filter((g) => !g.open && g.apexId !== null);
+	const open = gaps.filter((g) => g.open);
+	const bridgeIds = new Set(accepted.map((g) => g.apexId as string));
+	const candidateIds = new Set(open.flatMap((g) => g.candidateIds));
 
 	// An OPEN composite is drawn as its members (plus a frame); anything anchored on it
 	// attaches to its boundary: a left anchor resolves to its exits, a right anchor to
@@ -131,8 +199,13 @@ export function layoutPyramid(graph: GraphLike): PyramidLayout {
 		return (ports.length > 0 ? ports : fallback).flatMap((m) => endpoints(m, side, seen));
 	};
 
+	// Facts are atemporal connectors: never on the story line, only as triangle apexes.
 	const base = [...artifactsById.values()].filter(
-		(a) => !bridgeIds.has(a.id) && !candidateIds.has(a.id) && !openComposites.has(a.id)
+		(a) =>
+			a.artifactClass !== 'FACT' &&
+			!bridgeIds.has(a.id) &&
+			!candidateIds.has(a.id) &&
+			!openComposites.has(a.id)
 	);
 	const orderEdges: OrderEdge[] = graph.relations.flatMap((r) =>
 		endpoints(r.fromId, 'from').flatMap((fromId) =>
@@ -151,13 +224,13 @@ export function layoutPyramid(graph: GraphLike): PyramidLayout {
 
 	// Height of each expansion tree: the apex row of a root expansion equals the depth of
 	// its deepest descendant, so finer bridges sit lower and the pyramid widens downward.
-	const byId = new Map(graph.expansions.map((e) => [e.id, e]));
-	const rootOf = (e: Expansion): Expansion => {
+	const byId = new Map(gaps.map((g) => [g.id, g]));
+	const rootOf = (e: Gap): Gap => {
 		let cursor = e;
 		const seen = new Set<string>();
-		while (cursor.parentExpansionId !== null && !seen.has(cursor.id)) {
+		while (cursor.parentId !== null && !seen.has(cursor.id)) {
 			seen.add(cursor.id);
-			const parent = byId.get(cursor.parentExpansionId);
+			const parent = byId.get(cursor.parentId);
 			if (!parent) break;
 			cursor = parent;
 		}
@@ -188,7 +261,7 @@ export function layoutPyramid(graph: GraphLike): PyramidLayout {
 	ordered.forEach((a, i) => {
 		if (i > 0) cursorX += gap[i - 1] ?? BASE_GAP;
 		position.set(a.id, { x: cursorX, y: 0 });
-		nodes.push({ artifactId: a.id, x: cursorX, y: 0, role: 'base', depth: 0 });
+		nodes.push({ artifactId: a.id, x: cursorX, y: 0, role: 'base', depth: 0, stage: null });
 	});
 
 	const occupied = new Set<string>();
@@ -217,15 +290,23 @@ export function layoutPyramid(graph: GraphLike): PyramidLayout {
 	for (const e of accepted.toSorted(
 		(a, b) => a.depth - b.depth || a.createdAt.localeCompare(b.createdAt)
 	)) {
-		const bridge = e.selectedBridgeArtifactId as string;
+		const bridge = e.apexId as string;
 		const left = anchorAt(e.leftArtifactId, 'left');
 		const right = anchorAt(e.rightArtifactId, 'right');
 		if (!left || !right || !artifactsById.has(bridge)) continue;
 		const y = (treeDepth.get(rootOf(e).id) ?? e.depth) - e.depth + 1;
 		const x = place(bridge, (left.x + right.x) / 2, y);
-		nodes.push({ artifactId: bridge, x, y, role: 'bridge', depth: e.depth });
+		nodes.push({
+			artifactId: bridge,
+			x,
+			y,
+			role: e.source === 'triangle' ? 'fact' : 'bridge',
+			depth: e.depth,
+			stage: e.stageIndex
+		});
 		triangles.push({
 			expansionId: e.id,
+			source: e.source,
 			apexId: bridge,
 			leftId: e.leftArtifactId,
 			rightId: e.rightArtifactId,
@@ -236,7 +317,7 @@ export function layoutPyramid(graph: GraphLike): PyramidLayout {
 		const left = anchorAt(e.leftArtifactId, 'left');
 		const right = anchorAt(e.rightArtifactId, 'right');
 		if (!left || !right) continue;
-		e.bridgeArtifactIds
+		e.candidateIds
 			.filter((id) => artifactsById.has(id) && !position.has(id))
 			.forEach((id) => {
 				const x = place(id, (left.x + right.x) / 2, Math.max(left.y, right.y) + 0.5);
@@ -245,10 +326,12 @@ export function layoutPyramid(graph: GraphLike): PyramidLayout {
 					x,
 					y: Math.max(left.y, right.y) + 0.5,
 					role: 'candidate',
-					depth: e.depth
+					depth: e.depth,
+					stage: e.stageIndex
 				});
 				triangles.push({
 					expansionId: e.id,
+					source: e.source,
 					apexId: id,
 					leftId: e.leftArtifactId,
 					rightId: e.rightArtifactId,

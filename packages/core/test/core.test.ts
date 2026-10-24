@@ -273,6 +273,8 @@ describe('export bundles', () => {
 					snapshot: {
 						kind: a.kind,
 						composition: a.composition,
+						artifactClass: a.artifactClass,
+						factKind: a.factKind,
 						title: a.title,
 						body: a.body,
 						structured: a.structured,
@@ -293,6 +295,8 @@ describe('export bundles', () => {
 						snapshot: {
 							kind: 'FACT' as const,
 							composition: 'ATOMIC' as const,
+							artifactClass: 'BLOCK' as const,
+							factKind: null,
 							title: '',
 							body: '',
 							structured: {},
@@ -312,6 +316,8 @@ describe('export bundles', () => {
 						snapshot: {
 							kind: 'FACT' as const,
 							composition: 'ATOMIC' as const,
+							artifactClass: 'BLOCK' as const,
+							factKind: null,
 							title: '',
 							body: '',
 							structured: {},
@@ -526,5 +532,74 @@ describe('composites (core)', () => {
 		const titles = storyBeats({ ...full, project }).map((b) => b.artifact.title);
 		// outsider causes a2, so it precedes a2 on the line.
 		expect(titles).toEqual(['a1', 'outsider', 'a2', 'a3', 'C', 'b1', 'b2']);
+	});
+});
+
+describe('Block–Fact pyramid (ADR 0011)', () => {
+	it('draws each Fact as the apex over its anchors, keeps Facts off the story line and labels stages', () => {
+		const a = artifact('A seed', { creatorRole: 'A', ownerScope: 'A_PRIVATE' });
+		const b = artifact('B seed', { creatorRole: 'B', ownerScope: 'B_PRIVATE' });
+		const ac = artifact('A continuation', { creatorRole: 'A', ownerScope: 'A_PRIVATE' });
+		const bc = artifact('B continuation', { creatorRole: 'B', ownerScope: 'B_PRIVATE' });
+		const f1 = artifact('A seed with two shadows', {
+			artifactClass: 'FACT',
+			factKind: 'trace',
+			ownerScope: 'C_SHARED',
+			creatorRole: 'C'
+		});
+		const f2 = artifact('A ledger with a missing year', {
+			artifactClass: 'FACT',
+			factKind: 'document',
+			ownerScope: 'C_SHARED',
+			creatorRole: 'C'
+		});
+		const rels = [
+			relation(a.id, ac.id, { type: 'precedes' }),
+			relation(bc.id, b.id, { type: 'precedes' }),
+			relation(a.id, f1.id, { type: 'has_fact' }),
+			relation(b.id, f1.id, { type: 'has_fact' })
+		];
+		const at = new Date(0).toISOString();
+		const tri = (
+			id: string,
+			l: typeof a,
+			r: typeof a,
+			f: typeof a,
+			stage: number,
+			depth: number,
+			parent: string | null
+		) => ({
+			id,
+			projectId: a.projectId,
+			runId: null,
+			left: { artifactId: l.id, revisionId: l.headRevisionId, factAnchorId: null },
+			right: { artifactId: r.id, revisionId: r.headRevisionId, factAnchorId: null },
+			fact: { artifactId: f.id, revisionId: f.headRevisionId },
+			status: 'expanding' as const,
+			stageIndex: stage,
+			depth,
+			parentTriangleId: parent,
+			continuations: [],
+			createdAt: at,
+			updatedAt: at
+		});
+		const root = tri(nextId(), a, b, f1, 2, 1, null);
+		const child = tri(nextId(), ac, bc, f2, 4, 2, root.id);
+		const graph = {
+			artifacts: [a, b, ac, bc, f1, f2],
+			relations: rels,
+			expansions: [],
+			triangles: [root, child]
+		};
+		const layout = layoutPyramid(graph);
+		const node = new Map(layout.nodes.map((n) => [n.artifactId, n]));
+		expect(node.get(f1.id)).toMatchObject({ role: 'fact', stage: 2 });
+		expect(node.get(f2.id)).toMatchObject({ role: 'fact', stage: 4 });
+		expect(node.get(f1.id)!.x).toBe((node.get(a.id)!.x + node.get(b.id)!.x) / 2);
+		expect(node.get(f1.id)!.y).toBeGreaterThan(node.get(f2.id)!.y);
+		const titles = storyBeats({ ...graph, project: bundleProject(graph as MiniGraph) }).map(
+			(s) => s.artifact.title
+		);
+		expect(titles).toEqual(['A seed', 'A continuation', 'B continuation', 'B seed']);
 	});
 });

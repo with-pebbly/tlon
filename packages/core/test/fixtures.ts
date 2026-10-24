@@ -14,6 +14,8 @@ export function artifact(title: string, patch: Partial<Artifact> = {}): Artifact
 		projectId: uuid(1),
 		kind: 'FACT',
 		composition: 'ATOMIC',
+		artifactClass: 'BLOCK',
+		factKind: null,
 		title,
 		body: '',
 		structured: {},

@@ -1,8 +1,10 @@
-import type { Artifact, ProjectGraph } from '@tlon/contracts';
+import type { Artifact, ProjectGraph, Triangle } from '@tlon/contracts';
 
 import { layoutPyramid } from './pyramid.ts';
 
-type GraphLike = Pick<ProjectGraph, 'project' | 'artifacts' | 'relations' | 'expansions'>;
+type GraphLike = Pick<ProjectGraph, 'project' | 'artifacts' | 'relations' | 'expansions'> & {
+	triangles?: readonly Triangle[];
+};
 
 export type StoryBeat = {
 	index: number;
@@ -12,23 +14,26 @@ export type StoryBeat = {
 };
 
 /**
- * The scenario as one reading order: authored beats and accepted bridges sorted by
+ * The scenario as one reading order: Blocks and accepted legacy bridges sorted by
  * their position on the pyramid's base axis (in-order traversal of every expansion
- * tree), so each bridge lands between the two beats it reconciles. Rejected
- * artifacts, open candidates, disclosure notes and composites are left out.
+ * tree). Rejected artifacts, open candidates, disclosure notes, composites and Facts
+ * (atemporal connectors, ADR 0011) are left out.
  */
 export function storyBeats(graph: GraphLike): StoryBeat[] {
-	// Disclosure notes and composites are structure around the story, not beats in it.
+	// Disclosure notes, composites and Facts are structure around the story, not beats.
 	const excluded = new Set(
 		graph.artifacts
 			.filter(
-				(a) => (a.ownerScope === 'C_SHARED' && a.kind === 'NOTE') || a.composition === 'COMPOSITE'
+				(a) =>
+					(a.ownerScope === 'C_SHARED' && a.kind === 'NOTE') ||
+					a.composition === 'COMPOSITE' ||
+					a.artifactClass === 'FACT'
 			)
 			.map((a) => a.id)
 	);
 	const byId = new Map(graph.artifacts.map((a) => [a.id, a]));
 	return layoutPyramid(graph)
-		.nodes.filter((n) => n.role !== 'candidate' && !excluded.has(n.artifactId))
+		.nodes.filter((n) => n.role !== 'candidate' && n.role !== 'fact' && !excluded.has(n.artifactId))
 		.toSorted((a, b) => a.x - b.x || a.y - b.y)
 		.flatMap((n) => {
 			const artifact = byId.get(n.artifactId);
@@ -57,6 +62,7 @@ export function renderStoryMarkdown(
 	const lines = [`# ${graph.project.name}`, ''];
 	if (options.annotations) {
 		const bridges = beats.filter((b) => b.depth > 0).length;
+		// "bridges" = legacy full-scene bridges; Block–Fact projects report their Facts separately.
 		lines.push(
 			`_${beats.length} beats: ${beats.length - bridges} authored, ${bridges} bridges (max depth ${Math.max(0, ...beats.map((b) => b.depth))})._`,
 			''
@@ -82,6 +88,23 @@ export function renderStoryMarkdown(
 				lines.push(`> **Assumes:** ${s.assumptions.join('; ')}`);
 			}
 			lines.push('');
+		}
+	}
+	const triangles = (graph.triangles ?? []).filter(
+		(t) => t.fact !== null && t.status !== 'rejected' && t.status !== 'superseded'
+	);
+	if (options.annotations && triangles.length > 0) {
+		const byId = new Map(graph.artifacts.map((a) => [a.id, a]));
+		const number = new Map(beats.map((b) => [b.artifact.id, b.index]));
+		const ref = (id: string) =>
+			number.has(id) ? `#${number.get(id)}` : `“${byId.get(id)?.title ?? '?'}”`;
+		lines.push('', '---', '', '## Facts (mediator C)', '');
+		for (const t of triangles.toSorted((a, b) => a.stageIndex - b.stageIndex)) {
+			const fact = byId.get(t.fact!.artifactId);
+			if (!fact) continue;
+			lines.push(
+				`- **${fact.title}** (${fact.factKind ?? 'fact'}, stage ${t.stageIndex}) — links ${ref(t.left.artifactId)} and ${ref(t.right.artifactId)}`
+			);
 		}
 	}
 	return `${lines.join('\n').trimEnd()}\n`;
