@@ -19,8 +19,10 @@ class ToastState {
 		if (kind === 'info') setTimeout(() => this.dismiss(id), AUTO_DISMISS_MS);
 	}
 
-	/** Surface any thrown value; API errors keep their typed code. */
+	/** Surface any thrown value; API errors keep their typed code. A 401 is not toasted: the
+	 * api hook already routes the user to /login. */
 	error(error: unknown) {
+		if (isApiError(error) && error.status === 401) return;
 		if (isApiError(error)) this.push('error', error.message, error.code);
 		else if (error instanceof Error) this.push('error', error.message);
 		else this.push('error', String(error));

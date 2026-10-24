@@ -162,7 +162,7 @@ export const Principal = z.object({
 });
 export type Principal = z.infer<typeof Principal>;
 
-/** The local operator: single human, reached without a token from loopback only (ADR 0007). */
+/** The human operator principal: authenticated by the admin secret (bearer or session cookie, ADR 0007). */
 export const LOCAL_HUMAN: Principal = {
 	id: 'local-human',
 	kind: 'HUMAN',

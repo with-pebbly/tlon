@@ -1,7 +1,9 @@
 import {
 	API_PREFIX,
 	ApiErrorBody,
+	CSRF_HEADER,
 	IDEMPOTENCY_KEY_HEADER,
+	type CreateSessionInput,
 	IF_MATCH_HEADER,
 	type AcceptExpansionInput,
 	type AcceptExpansionResult,
@@ -65,12 +67,21 @@ export class ApiError extends Error {
 
 export const isApiError = (value: unknown): value is ApiError => value instanceof ApiError;
 
+let unauthenticatedHandler: (() => void) | null = null;
+
+/** Registers the reaction to any 401 (the session is missing or expired). */
+export function onUnauthenticated(handler: () => void) {
+	unauthenticatedHandler = handler;
+}
+
 type RequestOptions = {
-	method?: 'GET' | 'POST' | 'PATCH';
+	method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
 	body?: unknown;
 	headers?: Record<string, string>;
 	/** Only string/number/boolean values are sent; anything else is omitted. */
 	query?: Record<string, unknown>;
+	/** A 401 is an expected answer (e.g. a wrong token on login), not a lost session. */
+	expectUnauthenticated?: boolean;
 };
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
@@ -80,7 +91,13 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 			url.searchParams.set(key, String(value));
 		}
 	}
-	const headers: Record<string, string> = { accept: 'application/json', ...options.headers };
+	// The session cookie authenticates the browser; the custom header is the CSRF guard the API
+	// requires on cookie-authenticated mutations (cross-site forms cannot set it).
+	const headers: Record<string, string> = {
+		accept: 'application/json',
+		[CSRF_HEADER]: '1',
+		...options.headers
+	};
 	if (options.body !== undefined) headers['content-type'] = 'application/json';
 
 	let response: Response;
@@ -88,11 +105,14 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 		response = await fetch(url, {
 			method: options.method ?? 'GET',
 			headers,
+			credentials: 'same-origin',
 			body: options.body === undefined ? undefined : JSON.stringify(options.body)
 		});
 	} catch {
 		throw new ApiError('NETWORK_ERROR', 0, 'The API server is unreachable');
 	}
+
+	if (response.status === 401 && !options.expectUnauthenticated) unauthenticatedHandler?.();
 
 	const text = await response.text();
 	let payload: unknown = undefined;
@@ -128,6 +148,12 @@ const id = (value: string) => encodeURIComponent(value);
 
 export const api = {
 	health: () => request<{ ok: true }>('/health'),
+
+	/** Exchanges the admin token for an HttpOnly session cookie; a wrong token fails with 401. */
+	createSession: (input: CreateSessionInput) =>
+		request<undefined>('/session', { method: 'POST', body: input, expectUnauthenticated: true }),
+	deleteSession: () =>
+		request<undefined>('/session', { method: 'DELETE', expectUnauthenticated: true }),
 
 	listProjects: () => request<ProjectList>('/projects'),
 	createProject: (input: CreateProjectInput) =>

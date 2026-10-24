@@ -5,15 +5,17 @@ Decision record: [ADR 0007](adr/0007-artifact-gateway.md). Policy source:
 
 ## Principals
 
-| Principal   | How it authenticates              | Sees by default   | Can do                                                                 |
-| ----------- | --------------------------------- | ----------------- | ---------------------------------------------------------------------- |
-| Local human | no token, loopback socket only    | whole project     | everything, incl. agent admin, review, export/import                   |
-| A / B       | bearer token bound to one project | own private scope | create/edit own artifacts, propose relations between visible artifacts |
-| C           | bearer token                      | whole project     | open expansions, submit candidates, propose disclosures                |
-| VALIDATOR   | bearer token                      | whole project     | read only                                                              |
+| Principal | How it authenticates                                                                   | Sees by default   | Can do                                                                 |
+| --------- | -------------------------------------------------------------------------------------- | ----------------- | ---------------------------------------------------------------------- |
+| Human     | admin secret: bearer token, or `tlon_session` cookie (+ `X-Tlon-Csrf: 1` on mutations) | whole project     | everything, incl. agent admin, review, export/import                   |
+| A / B     | bearer token bound to one project                                                      | own private scope | create/edit own artifacts, propose relations between visible artifacts |
+| C         | bearer token                                                                           | whole project     | open expansions, submit candidates, propose disclosures                |
+| VALIDATOR | bearer token                                                                           | whole project     | read only                                                              |
 
 Tokens are short-lived, stored as SHA-256 hashes, revocable per token or by disabling
-the principal. Invalid tokens never fall back to human access.
+the principal. Invalid tokens never fall back to human access, and neither does network
+location: there is no tokenless access, including from loopback (agents share the host).
+The human secret (`TLON_ADMIN_TOKEN` or `.data/admin-token`) is never logged.
 
 ## Guarantees
 
@@ -31,5 +33,5 @@ These properties are covered by `apps/api/test/isolation.test.ts` (ARCHITECTURE 
 
 ## Not yet covered
 
-- Human authentication beyond loopback (single-operator deployment only).
+- Multi-user human authentication (single shared admin secret; sessions are in-memory).
 - Rate limits and budgets per agent (M4 run ledger).

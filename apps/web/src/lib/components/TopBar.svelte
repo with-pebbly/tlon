@@ -6,6 +6,7 @@
 	import { VIEWS } from '$lib/state/workspace.svelte';
 
 	import KindBadge from './KindBadge.svelte';
+	import LogoutButton from './LogoutButton.svelte';
 
 	const ws = getWorkspace();
 
@@ -147,4 +148,5 @@
 	<button class="btn" onclick={exportJson} disabled={exporting}>Export</button>
 	<button class="btn btn-primary" onclick={() => (ws.newArtifactOpen = true)}>+ New artifact</button
 	>
+	<LogoutButton />
 </header>

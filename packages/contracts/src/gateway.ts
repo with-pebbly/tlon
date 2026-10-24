@@ -45,6 +45,13 @@ export const IssueTokenInput = z.object({
 });
 export type IssueTokenInput = z.input<typeof IssueTokenInput>;
 
+/** Human login: exchange the admin secret for an HttpOnly session cookie (`POST /api/session`). */
+export const CreateSessionInput = z.object({ token: z.string().min(1).max(500) });
+export type CreateSessionInput = z.infer<typeof CreateSessionInput>;
+
+/** Cookie-authenticated mutations must carry this header (value `1`); Bearer requests are exempt. */
+export const CSRF_HEADER = 'x-tlon-csrf';
+
 /** Returned once; only a hash of `token` is stored. */
 export const IssuedToken = z.object({
 	tokenId: Uuid,

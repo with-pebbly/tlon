@@ -24,6 +24,8 @@ import { buildApp } from '../src/app.ts';
 
 const T0 = Date.parse('2026-01-01T00:00:00Z');
 const OUTSIDE = '203.0.113.9';
+const ADMIN = 'tlon_admin_test_token_0123456789abcdefghij';
+let sessionId = 'unset-session-id';
 let clock = T0;
 let t: TestService;
 let app: FastifyInstance;
@@ -31,21 +33,24 @@ const logLines: string[] = [];
 
 type CallOptions = {
 	token?: string;
+	/** Send no credentials at all (default: the admin bearer). */
+	anon?: boolean;
 	body?: unknown;
 	headers?: Record<string, string>;
 	remoteAddress?: string;
 };
 
 async function call<T = unknown>(
-	method: 'GET' | 'POST' | 'PATCH',
+	method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
 	url: string,
-	{ token, body, headers = {}, remoteAddress }: CallOptions = {}
+	{ token, anon, body, headers = {}, remoteAddress }: CallOptions = {}
 ) {
+	const bearer = anon ? undefined : (token ?? ADMIN);
 	const res = await app.inject({
 		method,
 		url: `/api${url}`,
 		payload: body as object | undefined,
-		headers: token ? { ...headers, authorization: `Bearer ${token}` } : headers,
+		headers: bearer ? { ...headers, authorization: `Bearer ${bearer}` } : headers,
 		...(remoteAddress ? { remoteAddress } : {})
 	});
 	const text = res.body;
@@ -100,6 +105,8 @@ beforeAll(async () => {
 	t = await createTestService({ now: () => new Date(clock) });
 	app = buildApp({
 		service: t.service,
+		adminToken: ADMIN,
+		now: () => clock,
 		logger: { level: 'info', stream: { write: (line: string) => void logLines.push(line) } }
 	});
 	const P = (await call<Project>('POST', '/projects', { body: { name: 'P', domain: 'GENERIC' } }))
@@ -770,51 +777,119 @@ describe('authentication', () => {
 		expect(norm(r.body, 'x')).toBe(norm(d.body, 'x'));
 		expect(norm(r.body, 'x')).toBe(norm(e.body, 'x'));
 
-		// A bad credential never falls back to the human, even from loopback.
+		// A bad credential never falls back to the human.
 		const loopbackBad = await call<ApiErrorBody>('GET', `${base()}/artifacts`, {
 			token: 'tlon_bad',
 			remoteAddress: '127.0.0.1'
 		});
 		expect(loopbackBad.status).toBe(401);
 		const basic = await call<ApiErrorBody>('GET', `${base()}/artifacts`, {
+			anon: true,
 			headers: { authorization: 'Basic dXNlcjpwYXNz' }
 		});
 		expect(basic.status).toBe(401);
-		const empty = await call<ApiErrorBody>('GET', '/whoami', { headers: { authorization: '' } });
+		const empty = await call<ApiErrorBody>('GET', '/whoami', {
+			anon: true,
+			headers: { authorization: '' }
+		});
 		expect(empty.status).toBe(401);
 	});
 
-	it('tokenless requests are human only from loopback sockets', async () => {
-		for (const remoteAddress of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
-			const who = await call<WhoAmI>('GET', '/whoami', { remoteAddress });
-			expect(who.body).toMatchObject({ kind: 'HUMAN', role: 'HUMAN', principalId: 'local-human' });
-		}
-		for (const remoteAddress of [OUTSIDE, '10.0.0.5', '2001:db8::1']) {
-			const res = await call<ApiErrorBody>('GET', `${base()}/artifacts`, { remoteAddress });
+	it('has no address-based trust: tokenless requests are 401 even from loopback', async () => {
+		for (const remoteAddress of ['127.0.0.1', '::1', '::ffff:127.0.0.1', OUTSIDE]) {
+			const res = await call<ApiErrorBody>('GET', `${base()}/artifacts`, {
+				anon: true,
+				remoteAddress,
+				headers: { 'x-forwarded-for': '127.0.0.1' }
+			});
 			expect([res.status, res.body.error.code]).toEqual([401, 'UNAUTHENTICATED']);
 		}
-		// Forwarding headers are attacker-controlled: only the socket peer counts.
-		const spoofed = await call<ApiErrorBody>('GET', '/whoami', {
-			remoteAddress: OUTSIDE,
-			headers: {
-				'x-forwarded-for': '127.0.0.1',
-				forwarded: 'for=127.0.0.1',
-				'x-real-ip': '127.0.0.1'
-			}
+		expect((await call('GET', '/whoami', { anon: true, remoteAddress: '127.0.0.1' })).status).toBe(
+			401
+		);
+		expect((await call('GET', '/health', { anon: true })).status).toBe(200);
+	});
+
+	it('admin bearer is HUMAN; agent tokens never are', async () => {
+		const human = await call<WhoAmI>('GET', '/whoami', { token: ADMIN, remoteAddress: OUTSIDE });
+		expect(human.body).toMatchObject({ kind: 'HUMAN', role: 'HUMAN', principalId: 'local-human' });
+		for (const agent of Object.values(w.agents)) {
+			const who = await call<WhoAmI>('GET', '/whoami', { token: agent.token });
+			expect(who.body.kind).toBe('AGENT');
+		}
+		const nearMiss = await call('GET', '/whoami', { token: `${ADMIN}x` });
+		expect(nearMiss.status).toBe(401);
+	});
+
+	it('POST /api/session: wrong token 401, right token yields a working cookie', async () => {
+		const wrong = await call<ApiErrorBody>('POST', '/session', {
+			anon: true,
+			body: { token: 'tlon_admin_wrong' }
 		});
-		expect(spoofed.status).toBe(401);
-		const forwardedFromLoopback = await call<WhoAmI>('GET', '/whoami', {
-			remoteAddress: '127.0.0.1',
-			headers: { 'x-forwarded-for': '1.2.3.4' }
+		expect([wrong.status, wrong.body.error.code]).toEqual([401, 'UNAUTHENTICATED']);
+		expect((await call('POST', '/session', { anon: true, body: {} })).status).toBe(400);
+
+		const login = await app.inject({
+			method: 'POST',
+			url: '/api/session',
+			payload: { token: ADMIN }
 		});
-		expect(forwardedFromLoopback.body.kind).toBe('HUMAN');
-		// Bearer-authenticated requests are fine from any host.
-		const remoteAgent = await call<WhoAmI>('GET', '/whoami', {
-			token: w.agents.C.token,
-			remoteAddress: OUTSIDE
+		expect(login.statusCode).toBe(204);
+		const setCookie = String(login.headers['set-cookie']);
+		expect(setCookie).toMatch(/^tlon_session=[\w-]+; Path=\/api; HttpOnly; SameSite=Strict/);
+		expect(setCookie).not.toContain('Secure');
+		sessionId = /tlon_session=([^;]+)/.exec(setCookie)![1]!;
+		const cookie = `tlon_session=${sessionId}`;
+
+		const who = await call<WhoAmI>('GET', '/whoami', { anon: true, headers: { cookie } });
+		expect(who.body.kind).toBe('HUMAN');
+
+		// Bad bearer never falls through to a valid cookie.
+		const bad = await call('GET', '/whoami', { token: 'tlon_bad', headers: { cookie } });
+		expect(bad.status).toBe(401);
+
+		// CSRF guard on cookie-authenticated mutations; Bearer is exempt.
+		const noCsrf = await call<ApiErrorBody>('POST', '/projects', {
+			anon: true,
+			headers: { cookie },
+			body: { name: 'csrf', domain: 'GENERIC' }
 		});
-		expect(remoteAgent.body).toMatchObject({ role: 'C', kind: 'AGENT' });
-		expect((await call('GET', '/health', { remoteAddress: OUTSIDE })).status).toBe(200);
+		expect([noCsrf.status, noCsrf.body.error.code]).toEqual([403, 'FORBIDDEN']);
+		const withCsrf = await call('POST', '/projects', {
+			anon: true,
+			headers: { cookie, 'x-tlon-csrf': '1' },
+			body: { name: 'csrf', domain: 'GENERIC' }
+		});
+		expect(withCsrf.status).toBe(201);
+
+		// DELETE /api/session ends the session.
+		const out = await app.inject({
+			method: 'DELETE',
+			url: '/api/session',
+			headers: { cookie }
+		});
+		expect(out.statusCode).toBe(204);
+		expect(String(out.headers['set-cookie'])).toContain('Max-Age=0');
+		expect((await call('GET', '/whoami', { anon: true, headers: { cookie } })).status).toBe(401);
+	});
+
+	it('sessions expire after 12 h (own clock; the shared one would expire agent tokens)', async () => {
+		let sessionClock = T0;
+		const own = buildApp({ service: t.service, adminToken: ADMIN, now: () => sessionClock });
+		const get = async (cookie: string) =>
+			(await own.inject({ method: 'GET', url: '/api/whoami', headers: { cookie } })).statusCode;
+		const login = await own.inject({
+			method: 'POST',
+			url: '/api/session',
+			payload: { token: ADMIN }
+		});
+		const cookie = `tlon_session=${/tlon_session=([^;]+)/.exec(String(login.headers['set-cookie']))![1]}`;
+		expect(await get(cookie)).toBe(200);
+		sessionClock += 12 * 60 * 60 * 1000 - 1000;
+		expect(await get(cookie)).toBe(200);
+		sessionClock += 2000;
+		expect(await get(cookie)).toBe(401);
+		await own.close();
 	});
 });
 
@@ -916,6 +991,8 @@ describe('audit and observability', () => {
 		expect(logs).not.toContain('bravo-secret');
 		expect(logs).not.toContain('forged-token-value');
 		for (const token of w.allTokens) expect(logs).not.toContain(token);
+		expect(logs).not.toContain(ADMIN);
+		expect(logs).not.toContain(sessionId);
 		expect(logs.toLowerCase()).not.toContain('bearer');
 	});
 });

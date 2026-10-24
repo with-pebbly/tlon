@@ -15,9 +15,16 @@ M0–M2 resolved every request to `LOCAL_HUMAN`.
   (`tlon_<secret>`, default TTL 1 h, max 24 h); only `sha256(token)` is stored. The
   role always comes from the principal record; role/principal fields in requests are
   ignored.
-- **Human access.** A request without a token is the local operator only when the TCP
-  peer is loopback (proxy headers are ignored). Real human authentication is out of
-  scope until multi-user (§10 non-goal).
+- **Human access.** The human authenticates with the admin secret: `Authorization: Bearer
+  <admin token>` (CLI/scripts) or the HttpOnly `tlon_session` cookie created by
+  `POST /api/session { token }` (SameSite=Strict, Path=/api, 12 h, in memory — a restart
+  invalidates sessions). Cookie-authenticated mutations must send `X-Tlon-Csrf: 1`. If an
+  `Authorization` header is present it must be valid (agent or admin token) and never falls
+  through to the cookie. The secret is `TLON_ADMIN_TOKEN` (≥ 32 chars) or, if unset, a random
+  value generated on first boot into `.data/admin-token` (mode 0600, path logged, value never).
+  **Why not "loopback = human":** agent sessions run on the same machine as the API, so a
+  loopback socket proves nothing about who is calling — any co-located process could omit
+  `Authorization` and read everything. Remote address is not used for authorization at all.
 - **Policy in one place.** `@tlon/core/visibility.ts` defines visible scopes,
   creation/write scopes and the role → action matrix. The store applies one SQL
   visibility predicate (scope ∈ visible scopes ∨ active READ grant) to every artifact,
