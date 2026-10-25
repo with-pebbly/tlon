@@ -11,11 +11,13 @@
 	import { UNANNOTATED_LABEL } from '$lib/state/workspace.svelte';
 
 	import IssueRow from './IssueRow.svelte';
+	import ReportProblemDialog from './ReportProblemDialog.svelte';
 
 	const ws = getWorkspace();
 
 	let showDismissed = $state(false);
 	let unannotatedOpen = $state(false);
+	let reporting = $state(false);
 
 	/** One group per kind; its heading takes the strongest tone (severity varies per item). */
 	const groups = $derived(
@@ -34,14 +36,22 @@
 </script>
 
 <section id="issues-panel" class="flex scroll-mt-3 flex-col gap-2" aria-label="Continuity issues">
-	<div class="flex items-baseline justify-between">
+	<div class="flex items-baseline justify-between gap-2">
 		<h3 class="section-title">Issues</h3>
-		<span class="text-[11px] text-zinc-400"
+		<span class="ml-auto text-[11px] text-zinc-400"
 			>{ws.openIssues.length} open · {ws.blockerCount} blocker{ws.blockerCount === 1
 				? ''
 				: 's'}</span
 		>
+		<button
+			class="btn btn-sm"
+			title="Record a continuity problem you found, grounded in quotes from the Blocks"
+			onclick={() => (reporting = true)}>Report a problem</button
+		>
 	</div>
+	{#if reporting}
+		<ReportProblemDialog onclose={() => (reporting = false)} />
+	{/if}
 
 	{#if ws.issuesError}
 		<div

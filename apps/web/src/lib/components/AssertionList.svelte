@@ -77,6 +77,13 @@
 				{#if assertion.preparation}
 					<span class="chip border-sky-200 bg-sky-50 text-sky-700">preparation</span>
 				{/if}
+				{#if assertion.timeless}
+					<span
+						class="chip border-amber-300 bg-amber-50 text-amber-800"
+						title="Timeless fact (identity, kinship, authorship, a past date or count): not world state; checked against the side's first statement of this key"
+						>timeless</span
+					>
+				{/if}
 				{#if provenance}
 					<span
 						class={['chip ml-auto', PROVENANCE_CHIP[provenance]]}
@@ -87,7 +94,7 @@
 			{#if assertion.note}
 				<p class="text-[11px] text-zinc-500">{assertion.note}</p>
 			{/if}
-			{#if incoming && world}
+			{#if incoming && world && !assertion.timeless}
 				{#if held === undefined}
 					<p class="text-[11px] text-zinc-400">Not established by an earlier annotated beat.</p>
 				{:else}

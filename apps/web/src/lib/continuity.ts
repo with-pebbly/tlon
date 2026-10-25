@@ -19,12 +19,15 @@ import { storyBeats } from '@tlon/core';
 export type IssueTone = 'blocker' | 'warning' | 'gap' | 'creative' | 'info';
 
 export function issueTone(issue: Pick<ValidationIssue, 'kind' | 'severity'>): IssueTone {
-	// Same-named entities are kept distinct; the flag only informs the reader.
-	if (issue.kind === 'ambiguous_entity') return 'info';
+	// Same-named entities are kept distinct; the flag only informs the reader. An annotation
+	// setting one key twice is the extraction's shape, not a story defect.
+	if (issue.kind === 'ambiguous_entity' || issue.kind === 'annotation_conflict') return 'info';
+	// Two Blocks of one side disagreeing on a timeless fact is a contradiction however far apart.
+	if (issue.kind === 'fact_conflict') return 'blocker';
 	if (issue.severity === 'blocker') return 'blocker';
 	if (issue.kind === 'tension' || issue.kind === 'perspective_conflict') return 'creative';
 	if (issue.kind === 'missing_transition' && issue.severity === 'warning') return 'gap';
-	if (issue.kind === 'direction_mismatch') return 'warning';
+	if (issue.kind === 'direction_mismatch' || issue.kind === 'identity_conflict') return 'warning';
 	return issue.severity === 'warning' ? 'warning' : 'info';
 }
 
@@ -98,7 +101,9 @@ export function toneRing(
 /** Panel group order: blockers first, gaps and creative input after warnings, info last. */
 export const ISSUE_KIND_ORDER: readonly IssueKind[] = [
 	'continuity_violation',
+	'fact_conflict',
 	'anchor_violation',
+	'identity_conflict',
 	'temporal_order',
 	'direction_mismatch',
 	'duplicate_event',
@@ -110,6 +115,7 @@ export const ISSUE_KIND_ORDER: readonly IssueKind[] = [
 	'perspective_conflict',
 	'redundancy',
 	'ambiguous_entity',
+	'annotation_conflict',
 	'unknown'
 ];
 
@@ -127,7 +133,39 @@ export const ISSUE_KIND_LABEL: Record<IssueKind, string> = {
 	missing_transition: 'Gap — missing transition',
 	direction_mismatch: 'Time runs against the continuation direction',
 	ambiguous_entity: 'Same name, distinct entities',
+	fact_conflict: 'Timeless fact contradicted',
+	identity_conflict: 'Identity conflict',
+	annotation_conflict: 'Annotation sets one key twice',
 	unknown: 'Other'
+};
+
+/** Extra reading note per kind, shown under the explanation. */
+export const ISSUE_KIND_NOTE: Partial<Record<IssueKind, string>> = {
+	fact_conflict:
+		'Kinship, authorship, dates or counts of past events cannot change off-page: one of the Blocks must be repaired.',
+	identity_conflict:
+		'Name variants of what may be one person carry incompatible roles. Entities are never merged automatically.',
+	annotation_conflict:
+		'The annotation shape, not the story: one Block’s annotation sets this key to several values. Re-annotate the Block; the key is not checked until then.'
+};
+
+/** Who raised the issue: computed by replaying annotations, a grounded audit, or a facilitator. */
+export const ISSUE_SOURCE_LABEL: Record<ValidationIssue['source'], string> = {
+	replay: 'computed',
+	audit: 'audit',
+	human: 'facilitator'
+};
+
+export const ISSUE_SOURCE_CHIP: Record<ValidationIssue['source'], string> = {
+	replay: 'border-zinc-300 bg-white text-zinc-600',
+	audit: 'border-indigo-200 bg-indigo-50 text-indigo-700',
+	human: 'border-violet-200 bg-violet-50 text-violet-700'
+};
+
+export const ISSUE_SOURCE_TITLE: Record<ValidationIssue['source'], string> = {
+	replay: 'Computed from the state annotations',
+	audit: 'Grounded finding of a continuity audit (quotes checked against the Block texts)',
+	human: 'Reported by a facilitator (quotes checked against the Block texts)'
 };
 
 export const SUGGESTED_ACTION_LABEL: Record<
@@ -190,15 +228,33 @@ export const MONOTONIC_BADGE: Record<
 export const clockOf = (minute: number) =>
 	`${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
 
+/** Month names of `BeatTime.month` (1–12) in form controls and time chips. */
+export const MONTH_NAMES = [
+	'Jan',
+	'Feb',
+	'Mar',
+	'Apr',
+	'May',
+	'Jun',
+	'Jul',
+	'Aug',
+	'Sep',
+	'Oct',
+	'Nov',
+	'Dec'
+] as const;
+
 /**
- * "1958 · Day N hh:mm ±t · relative" of a beat time, story day 0 shown as Day 1; null
- * when the text gives no year, day, clock time or relative statement. A flashback is
+ * "12 Sep 1958 · Day N hh:mm ±t · relative" of a beat time, story day 0 shown as Day 1;
+ * null when the text gives no date, day, clock time or relative statement. A flashback is
  * marked with ↶. A relative statement is shown verbatim — its absolute date stays unknown.
  */
 export function formatBeatTime(time: BeatTime | undefined): string | null {
 	if (
 		!time ||
 		(time.year === undefined &&
+			time.month === undefined &&
+			time.dayOfMonth === undefined &&
 			time.day === undefined &&
 			time.minute === undefined &&
 			!time.relative)
@@ -206,6 +262,8 @@ export function formatBeatTime(time: BeatTime | undefined): string | null {
 		return null;
 	const parts: string[] = [];
 	if (time.outOfOrder) parts.push('↶');
+	if (time.dayOfMonth !== undefined) parts.push(String(time.dayOfMonth));
+	if (time.month !== undefined) parts.push(MONTH_NAMES[time.month - 1] ?? `month ${time.month}`);
 	if (time.year !== undefined) parts.push(String(time.year));
 	if (time.day !== undefined) parts.push(`Day ${time.day + 1}`);
 	if (time.minute !== undefined) parts.push(clockOf(time.minute));
@@ -261,7 +319,9 @@ export type ReplayedState = {
 
 /**
  * World state entering `path[index]`, replayed like `validateContinuity`: only world
- * effects of earlier beats set state; preconditions never do.
+ * effects of earlier beats set state; preconditions never do. Timeless facts are not
+ * state (they are checked per side on their own), and a key one Block sets to several
+ * values is ambiguous there (`annotation_conflict`), so it sets nothing.
  */
 export function replayBefore(
 	path: readonly string[],
@@ -277,8 +337,14 @@ export function replayBefore(
 			blind.push(artifactId);
 			continue;
 		}
+		const valuesByKey = new Map<string, Set<Assertion['value']>>();
 		for (const effect of t.effects) {
 			const key = stateKeyOf(effect);
+			valuesByKey.set(key, (valuesByKey.get(key) ?? new Set()).add(effect.value));
+		}
+		for (const effect of t.effects) {
+			const key = stateKeyOf(effect);
+			if (effect.timeless || (valuesByKey.get(key)?.size ?? 0) > 1) continue;
 			if (effect.epistemic === 'world') {
 				world.set(key, {
 					value: effect.value,
@@ -348,9 +414,12 @@ export function renderIssuesMarkdown(
 		for (const { issue, ids } of items) {
 			const key = issue.stateKey ? ` · \`${issue.stateKey}\`` : '';
 			lines.push(
-				`- **${ISSUE_KIND_LABEL[issue.kind]}**${key} · beats ${ids.map(beatRef).join(', ')}`,
+				`- **${ISSUE_KIND_LABEL[issue.kind]}**${key} · ${ISSUE_SOURCE_LABEL[issue.source]} · beats ${ids.map(beatRef).join(', ')}`,
 				`  ${issue.explanation}`
 			);
+			for (const item of issue.evidence) {
+				lines.push(`  > «${item.quote}» — ${beatRef(item.artifactId)}`);
+			}
 			for (const id of ids) lines.push(`  - ${beatRef(id)} ${titles.get(id) ?? id}`);
 			if (issue.suggestedAction) {
 				lines.push(`  - _Suggested: ${SUGGESTED_ACTION_LABEL[issue.suggestedAction]}_`);

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { clockOf, MONOTONIC_BADGE } from '$lib/continuity';
+	import { clockOf, MONOTONIC_BADGE, MONTH_NAMES } from '$lib/continuity';
 	import {
 		BEAT_FUNCTIONS,
 		EntityRef,
@@ -25,6 +25,7 @@
 		preparation: boolean;
 		unit: string;
 		monotonic: Assertion['monotonic'] | '';
+		timeless: boolean;
 	};
 	type EventList = 'events' | 'repeatableEvents';
 	type EntityRow = {
@@ -33,6 +34,8 @@
 		name: string;
 		kind: EntityRef['kind'];
 		distinguishing: string;
+		/** Other names of the same entity, comma-separated as typed. */
+		aliases: string;
 	};
 
 	let {
@@ -94,7 +97,8 @@
 		irreversible: a?.irreversible ?? false,
 		preparation: a?.preparation ?? false,
 		unit: a?.unit ?? '',
-		monotonic: a?.monotonic ?? ''
+		monotonic: a?.monotonic ?? '',
+		timeless: a?.timeless ?? false
 	});
 
 	// The editor is mounted per edit session: it starts from the annotation as it was.
@@ -111,6 +115,8 @@
 	/** Story time as typed: Day N is 1-based in the form, `day` 0-based in the contract. */
 	let time = $state<{
 		year: number | null;
+		month: number | null;
+		dayOfMonth: number | null;
 		day: number | null;
 		clock: string;
 		relative: string;
@@ -119,6 +125,8 @@
 		outOfOrder: boolean;
 	}>({
 		year: start?.time?.year ?? null,
+		month: start?.time?.month ?? null,
+		dayOfMonth: start?.time?.dayOfMonth ?? null,
 		day: start?.time?.day === undefined ? null : start.time.day + 1,
 		clock: start?.time?.minute === undefined ? '' : clockOf(start.time.minute),
 		relative: start?.time?.relative ?? '',
@@ -132,7 +140,8 @@
 			id: e.id,
 			name: e.name,
 			kind: e.kind,
-			distinguishing: e.distinguishing ?? ''
+			distinguishing: e.distinguishing ?? '',
+			aliases: e.aliases.join(', ')
 		}))
 	);
 	let functions = $state<BeatFunction[]>([...(start?.functions ?? [])]);
@@ -156,6 +165,8 @@
 
 	function toTime(): TransitionInput['time'] {
 		const year = typeof time.year === 'number' ? time.year : undefined;
+		const month = typeof time.month === 'number' ? time.month : undefined;
+		const dayOfMonth = typeof time.dayOfMonth === 'number' ? time.dayOfMonth : undefined;
 		const day = typeof time.day === 'number' ? time.day - 1 : undefined;
 		const [hours, minutes] = time.clock.split(':').map(Number);
 		const minute =
@@ -165,6 +176,8 @@
 		const relative = time.relative.trim();
 		if (
 			year === undefined &&
+			month === undefined &&
+			dayOfMonth === undefined &&
 			day === undefined &&
 			minute === undefined &&
 			relative === '' &&
@@ -173,6 +186,8 @@
 			return undefined;
 		return {
 			...(year === undefined ? {} : { year }),
+			...(month === undefined ? {} : { month }),
+			...(dayOfMonth === undefined ? {} : { dayOfMonth }),
 			...(day === undefined ? {} : { day }),
 			...(minute === undefined ? {} : { minute }),
 			...(relative === '' ? {} : { relative }),
@@ -199,6 +214,7 @@
 			epistemic: row.epistemic,
 			irreversible: row.irreversible,
 			preparation: row.preparation,
+			timeless: row.timeless,
 			...(row.note.trim() ? { note: row.note.trim() } : {}),
 			...(row.holder.trim() ? { holder: row.holder.trim() } : {}),
 			...(row.unit.trim() ? { unit: row.unit.trim() } : {}),
@@ -216,7 +232,15 @@
 			events: [...events.events],
 			repeatableEvents: [...events.repeatableEvents],
 			entities: entities.map((e) => {
-				const entity: EntityRef = { id: e.id.trim(), name: e.name.trim(), kind: e.kind };
+				const entity: EntityRef = {
+					id: e.id.trim(),
+					name: e.name.trim(),
+					kind: e.kind,
+					aliases: e.aliases
+						.split(',')
+						.map((alias) => alias.trim())
+						.filter((alias) => alias !== '')
+				};
 				const distinguishing = e.distinguishing.trim();
 				if (distinguishing !== '') entity.distinguishing = distinguishing;
 				return entity;
@@ -252,6 +276,28 @@
 					placeholder="—"
 					aria-label="Calendar year"
 					bind:value={time.year}
+				/></label
+			>
+			<label class="flex items-center gap-1"
+				>Month <select
+					class="input h-6 w-auto py-0 text-xs"
+					aria-label="Calendar month"
+					bind:value={time.month}
+				>
+					<option value={null}>—</option>
+					{#each MONTH_NAMES as name, i (name)}<option value={i + 1}>{name}</option>{/each}
+				</select></label
+			>
+			<label class="flex items-center gap-1"
+				>Date <input
+					type="number"
+					min="1"
+					max="31"
+					step="1"
+					class="input h-6 w-14 text-xs"
+					placeholder="—"
+					aria-label="Day of the month"
+					bind:value={time.dayOfMonth}
 				/></label
 			>
 			<label class="flex items-center gap-1"
@@ -376,6 +422,13 @@
 					aria-label="Entity {index + 1} distinguishing detail"
 					bind:value={entity.distinguishing}
 				/>
+				<input
+					class="input h-6 w-full text-xs"
+					placeholder="aliases, comma-separated (Bill, William Smith)"
+					title="Other names the text uses for this same entity — kept on this id, never merged with another"
+					aria-label="Entity {index + 1} aliases"
+					bind:value={entity.aliases}
+				/>
 				<button
 					type="button"
 					class="btn btn-ghost btn-sm px-1 text-zinc-400"
@@ -388,8 +441,14 @@
 			type="button"
 			class="btn btn-sm self-start"
 			onclick={() =>
-				entities.push({ uid: nextUid++, id: '', name: '', kind: 'person', distinguishing: '' })}
-			>+ entity</button
+				entities.push({
+					uid: nextUid++,
+					id: '',
+					name: '',
+					kind: 'person',
+					distinguishing: '',
+					aliases: ''
+				})}>+ entity</button
 		>
 	</fieldset>
 
@@ -472,6 +531,11 @@
 						>
 						<label class="flex items-center gap-1"
 							><input type="checkbox" bind:checked={row.preparation} /> preparation</label
+						>
+						<label
+							class="flex items-center gap-1"
+							title="Holds for the whole story world: identity, kinship, who wrote to whom, the date, place or count of a past event. It cannot change off-page; two Blocks of one side disagreeing on it are a contradiction."
+							><input type="checkbox" bind:checked={row.timeless} /> timeless</label
 						>
 						{#if /^-?\d+(\.\d+)?$/.test(row.value.trim()) || row.unit || row.monotonic}
 							<input

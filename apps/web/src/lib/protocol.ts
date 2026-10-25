@@ -52,6 +52,7 @@ export const TASK_TYPE_LABEL: Record<TaskType, string> = {
 	seed_block: 'Write the opening block',
 	propose_fact: 'Propose a connecting Fact',
 	advance_block: 'Continue your block',
+	revise_block: 'Repair one of your blocks',
 	review_triangle: 'Review a triangle',
 	compose_subgraph: 'Compose a subgraph'
 };
@@ -61,6 +62,7 @@ export const TASK_TYPE_SHORT: Record<TaskType, string> = {
 	seed_block: 'seed',
 	propose_fact: 'propose fact',
 	advance_block: 'advance',
+	revise_block: 'revise',
 	review_triangle: 'review',
 	compose_subgraph: 'compose'
 };
@@ -152,7 +154,7 @@ export const COMPLETION_POLICY_LABEL: Record<CompletionPolicy, string> = {
 
 /** What each policy requires before it can be certified (mirrors `completionReport`). */
 export const COMPLETION_POLICY_HINT: Record<CompletionPolicy, string> = {
-	exploratory: 'Always certifiable — a draft; Facts may stay unexplained.',
+	exploratory: 'No open blockers — a draft; Facts may stay unexplained.',
 	coherent_open_mystery:
 		'No open blockers, and every open question is approved by a facilitator as intentional.',
 	causally_connected:

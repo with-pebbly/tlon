@@ -174,7 +174,10 @@ program
 			.choices(['presentation', 'chronological'])
 			.default('presentation')
 	)
-	.option('--organizer', 'append connections, the completion report and the isolation audit')
+	.option(
+		'--organizer',
+		'append connections, the completion report, open continuity issues and the isolation audit'
+	)
 	.description('render the scenario as a linear Markdown manuscript')
 	.action(
 		action(
@@ -193,12 +196,20 @@ program
 						service.getProtocol(principal, projectId)
 					]);
 					if (options.organizer !== true) return { graph, protocol };
-					const [connections, completion, audit] = await Promise.all([
+					const [connections, completion, audit, issues] = await Promise.all([
 						service.listConnections(principal, projectId),
 						service.getCompletion(principal, projectId),
-						service.getAudit(principal, projectId)
+						service.getAudit(principal, projectId),
+						service.listIssues(principal, projectId)
 					]);
-					return { graph, protocol, connections: connections.items, completion, audit };
+					return {
+						graph,
+						protocol,
+						connections: connections.items,
+						completion,
+						audit,
+						issues: issues.items
+					};
 				});
 				const markdown = renderStoryMarkdown(
 					{ ...data.graph, triangles: data.protocol.triangles },
@@ -210,7 +221,8 @@ program
 							? {
 									connections: data.connections,
 									completion: data.completion,
-									audit: data.audit
+									audit: data.audit,
+									issues: data.issues
 								}
 							: {})
 					}
@@ -254,6 +266,17 @@ program
 		action(async (projectId: string) => {
 			const report = await withService((service) => service.getAudit(principal, projectId));
 			out(JSON.stringify(report, null, 2));
+		})
+	);
+
+program
+	.command('findings')
+	.argument('<projectId>')
+	.description('print the reported continuity findings (audit and facilitator) as JSON')
+	.action(
+		action(async (projectId: string) => {
+			const list = await withService((service) => service.listFindings(principal, projectId));
+			out(JSON.stringify(list, null, 2));
 		})
 	);
 

@@ -33,7 +33,12 @@ import {
 	Triangle
 } from './protocol.ts';
 import { BridgeStructured, StructuredRecord } from './structured.ts';
-import { Transition, TransitionAnnotation, ValidationIssue } from './validation.ts';
+import {
+	ContinuityFinding,
+	Transition,
+	TransitionAnnotation,
+	ValidationIssue
+} from './validation.ts';
 
 /** HTTP header carrying the expected head revision ID for optimistic concurrency. */
 export const IF_MATCH_HEADER = 'if-match';
@@ -276,7 +281,11 @@ export const ExportBundle = z.object({
 	factAnchors: z.array(FactAnchor).optional(),
 	/** Organizer-only joining state (additive; absent in older bundles). */
 	connections: z.array(NarrativeConnection).optional(),
-	certifications: z.array(Certification).optional()
+	certifications: z.array(Certification).optional(),
+	/** Grounded continuity findings (additive; bundles written before `reviseArtifactId` omit it). */
+	findings: z
+		.array(ContinuityFinding.extend({ reviseArtifactId: Uuid.nullable().default(null) }))
+		.optional()
 });
 export type ExportBundle = z.infer<typeof ExportBundle>;
 

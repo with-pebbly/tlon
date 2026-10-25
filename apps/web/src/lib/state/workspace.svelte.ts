@@ -41,6 +41,10 @@ import {
 	type ReviewDisclosureInput,
 	type DismissIssueInput,
 	type IssueList,
+	type ContinuityFinding,
+	type CreateFindingInput,
+	type RequestRevisionInput,
+	type Task,
 	type TransitionInput,
 	type ValidationIssue,
 	type AgentRole,
@@ -68,7 +72,7 @@ import {
 	validateContinuity,
 	type AggregatedEdge
 } from '@tlon/core';
-import { SvelteSet } from 'svelte/reactivity';
+import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 
 /** Highlight label of the Issues panel's "unannotated beats" link (toggles it). */
 export const UNANNOTATED_LABEL = 'unannotated beats';
@@ -201,6 +205,11 @@ export class Workspace {
 	artifactTab = $state<'details' | 'state'>('details');
 	/** Open "Compare neighbours" view: the centre beat and the state key to highlight. */
 	compare = $state.raw<{ artifactId: string; stateKey: string | null } | null>(null);
+	/**
+	 * Revision tasks requested from this page: issue key → `revise_block` task id. UI only;
+	 * the task itself lives on the protocol task board (`tasks`).
+	 */
+	revisionTaskByIssue = new SvelteMap<string, string>();
 
 	/** Block–Fact protocol state (`GET /protocol`), loaded beside the graph. */
 	protocol = $state.raw<ProtocolState | null>(null);
@@ -941,6 +950,31 @@ export class Workspace {
 		};
 		this.focusRequest = { artifactId: left, at: Date.now() };
 		return 'selected';
+	}
+
+	/** Records a grounded facilitator finding; it joins the open issues as `source: human`. */
+	async createFinding(input: CreateFindingInput): Promise<ContinuityFinding> {
+		this.pending++;
+		try {
+			const finding = await api.createFinding(this.projectId, input);
+			await this.reloadIssues();
+			return finding;
+		} finally {
+			this.pending--;
+		}
+	}
+
+	/** Sends one Block of a side-local issue back to its owning side as a `revise_block` task. */
+	async requestRevision(input: RequestRevisionInput): Promise<Task> {
+		this.pending++;
+		try {
+			const task = await api.requestRevision(this.projectId, input);
+			this.revisionTaskByIssue.set(input.issueKey, task.id);
+			await this.reloadProtocol();
+			return task;
+		} finally {
+			this.pending--;
+		}
 	}
 
 	async createRelation(input: CreateRelationInput): Promise<Relation> {

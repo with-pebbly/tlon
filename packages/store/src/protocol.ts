@@ -2,6 +2,9 @@ import { randomBytes } from 'node:crypto';
 
 import {
 	AGENT_TOKEN_PREFIX,
+	LOCAL_HUMAN,
+	RequestRevisionInput,
+	type ReviseTaskPayload,
 	AcceptFactInput,
 	type Artifact,
 	type ArtifactSnapshot,
@@ -40,8 +43,8 @@ import {
 	lintFactText,
 	parseStructured
 } from '@tlon/contracts';
-import { isActionAllowed, visibleScopesFor, type GatewayAction } from '@tlon/core';
-import { and, asc, desc, eq, inArray, isNull, ne, or, sql, type SQL } from 'drizzle-orm';
+import { isActionAllowed, storyBeats, visibleScopesFor, type GatewayAction } from '@tlon/core';
+import { and, asc, desc, eq, inArray, isNull, max, ne, or, sql, type SQL } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 
 import { appendRevision, insertArtifact } from './artifacts.ts';
@@ -58,11 +61,20 @@ import {
 	parseInput,
 	type Ctx
 } from './internal.ts';
-import { getArtifactRow, loadRelations, loadTriangles, selectArtifacts } from './projections.ts';
+import {
+	getArtifactRow,
+	loadFindings,
+	loadIssueList,
+	loadRelations,
+	loadTriangles,
+	loadValidationGraph,
+	selectArtifacts
+} from './projections.ts';
 import { assertEndpointsInProject } from './relations.ts';
 import {
 	agentPrincipals,
 	completionCertifications,
+	continuityFindings,
 	narrativeConnections,
 	agentTokens,
 	artifactRevisions,
@@ -87,6 +99,8 @@ const DEFAULT_PARTICIPANT_TTL_SECONDS = 24 * 60 * 60;
 /** Depth cap for gaps opened outside any run (RunConfig.maxDepth's own ceiling). */
 const UNBOUNDED_RUN_DEPTH = 10;
 const LOCAL_CHAIN_LIMIT = 6;
+/** Any UUID inside free text (issue keys embed artifact and finding ids). */
+const UUID_IN_TEXT = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 const IN_CHUNK = 5000;
 
 type Side = 'left' | 'right';
@@ -133,7 +147,8 @@ function toTask(row: ProtocolTaskRow, principal: Principal): Task {
 		direction: row.direction as Direction | null,
 		resultRefs: row.resultRefs,
 		createdAt: row.createdAt.toISOString(),
-		submittedAt: row.submittedAt?.toISOString() ?? null
+		submittedAt: row.submittedAt?.toISOString() ?? null,
+		payload: full ? row.payload : null
 	};
 }
 
@@ -292,6 +307,10 @@ type NewTask = {
 	triangleId?: string;
 	side?: Side;
 	direction?: Direction;
+	/** `revise_block` only. */
+	payload?: ReviseTaskPayload;
+	/** Leave the task claimable by any participant of the role instead of the single default one. */
+	openClaim?: true;
 };
 
 async function insertTask(ctx: Ctx, q: Db, task: NewTask): Promise<ProtocolTaskRow> {
@@ -303,13 +322,16 @@ async function insertTask(ctx: Ctx, q: Db, task: NewTask): Promise<ProtocolTaskR
 			runId: task.runId,
 			type: task.type,
 			role: task.role,
-			assigneePrincipalId: await defaultAssignee(q, task.projectId, task.role),
+			assigneePrincipalId: task.openClaim
+				? null
+				: await defaultAssignee(q, task.projectId, task.role),
 			state: 'pending',
 			stageIndex: task.stageIndex,
 			depth: task.depth,
 			triangleId: task.triangleId ?? null,
 			side: task.side ?? null,
 			direction: task.direction ?? null,
+			payload: task.payload ?? null,
 			resultRefs: [],
 			submitIdempotencyKey: null,
 			createdAt: ctx.now(),
@@ -386,6 +408,8 @@ async function recordInputManifest(
 		inputs = [block(view.left), block(view.right), ...view.existingFacts.map(fact)];
 	} else if (view.type === 'advance_block') {
 		inputs = [block(view.ownBlock), ...view.localContext.map(block), fact(view.fact)];
+	} else if (view.type === 'revise_block') {
+		inputs = [block(view.ownBlock), ...view.localContext.map(block)];
 	}
 	const manifest = await buildInputManifest(ctx, q, principal, projectId, inputs);
 	await q
@@ -726,14 +750,51 @@ async function localChain(
 		seen.add(next.id);
 		cursor = next.id;
 	}
-	return chain.map((a) => ({
+	return chain.map(headBlockView);
+}
+
+/** A Block as served to an executor: its current head revision. */
+function headBlockView(a: Artifact): BlockView {
+	return {
 		id: a.id,
 		revisionId: a.headRevisionId,
 		kind: a.kind,
 		title: a.title,
 		body: a.body,
 		ownerScope: a.ownerScope
-	}));
+	};
+}
+
+/**
+ * View of a `revise_block` task. Reading order comes from the whole story graph (computed
+ * with full read access), but only Blocks of the executor's own scope leave this function.
+ */
+async function reviseView(
+	ctx: Ctx,
+	tx: Db,
+	principal: Principal,
+	projectId: string,
+	task: ProtocolTaskRow,
+	taskView: Task
+): Promise<TaskView> {
+	const payload = task.payload;
+	if (payload === null) throw new TlonError('INTERNAL', 'revise task without a payload');
+	const own = (await visibleArtifacts(ctx, tx, principal, projectId, [payload.artifactId])).get(
+		payload.artifactId
+	);
+	if (!own) throw new TlonError('INTERNAL', 'revision target is missing');
+	const graph = await loadValidationGraph(ctx, tx, LOCAL_HUMAN, projectId);
+	const side = storyBeats(graph)
+		.map((beat) => beat.artifact)
+		.filter((a) => a.ownerScope === own.ownerScope && a.artifactClass === 'BLOCK');
+	return {
+		type: 'revise_block',
+		task: taskView,
+		ownBlock: headBlockView(own),
+		localContext: (side.some((a) => a.id === own.id) ? side : [...side, own]).map(headBlockView),
+		problems: payload.problems,
+		instructions: payload.instructions
+	};
 }
 
 /** Gives a role-matched executor its side's access lazily (late-joining participants). */
@@ -765,6 +826,9 @@ async function buildView(
 			task: taskView,
 			brief: task.role === 'A' ? run.briefs.A : run.briefs.B
 		};
+	}
+	if (task.type === 'revise_block') {
+		return reviseView(ctx, tx, principal, projectId, task, taskView);
 	}
 	if (task.triangleId === null) throw new TlonError('INTERNAL', 'task without a triangle');
 	const triangle = await getTriangleRow(tx, projectId, task.triangleId);
@@ -1301,6 +1365,38 @@ export function protocolMethods(ctx: Ctx) {
 						}
 						resultRefs.push({ artifactId: fact.id, revisionId: fact.headRevisionId });
 					}
+				} else if (submission.type === 'revise_block') {
+					const payload = task.payload;
+					if (payload === null) throw new TlonError('INTERNAL', 'revise task without a payload');
+					// Invisible → ARTIFACT_NOT_FOUND; another side's Block is never writable here.
+					const current = await getArtifactRow(ctx, tx, principal, projectId, payload.artifactId);
+					if (current.row.ownerScope !== blockScope(principal)) {
+						throw new TlonError('FORBIDDEN', 'the Block belongs to the other side', {
+							artifactId: payload.artifactId
+						});
+					}
+					if (current.row.locked) {
+						throw new TlonError('INVALID_STATE', 'the Block is locked', {
+							artifactId: payload.artifactId
+						});
+					}
+					const kind = submission.block.kind;
+					const structured = guardValidation(() =>
+						parseStructured(
+							project.domain as 'NARRATIVE' | 'GENERIC',
+							kind,
+							kind === current.row.kind ? current.row.structured : {}
+						)
+					);
+					const revised = await appendRevision(
+						ctx,
+						tx,
+						principal,
+						current,
+						{ kind, title: submission.block.title, body: submission.block.body, structured },
+						`revise task ${task.id}`
+					);
+					resultRefs.push({ artifactId: revised.row.id, revisionId: revised.row.headRevisionId });
 				} else {
 					if (task.triangleId === null || task.side === null) {
 						throw new TlonError('INTERNAL', 'task without a triangle');
@@ -1710,6 +1806,105 @@ export function protocolMethods(ctx: Ctx) {
 			});
 		},
 
+		/**
+		 * Facilitator asks the owning side to repair an open issue inside its own chain. The task
+		 * only carries that side's Blocks and quotes; an issue spanning sides is refused.
+		 */
+		async requestRevision(principal: Principal, projectId: string, input: unknown): Promise<Task> {
+			return db.transaction(async (tx) => {
+				await authorize(tx, principal, projectId, 'protocol.facilitate');
+				const data = parseInput(RequestRevisionInput, input);
+				const { items } = await loadIssueList(ctx, tx, principal, projectId);
+				const issue = items.find((i) => i.key === data.issueKey && i.dismissal === null);
+				if (!issue)
+					throw new TlonError('ISSUE_NOT_FOUND', 'issue not found', { key: data.issueKey });
+				if (!issue.artifactIds.includes(data.artifactId)) {
+					throw new TlonError('VALIDATION_FAILED', 'artifactId is not one of the issue Blocks', {
+						artifactId: data.artifactId
+					});
+				}
+				const cited = [
+					...new Set([...issue.artifactIds, ...issue.evidence.map((e) => e.artifactId)])
+				];
+				const rows = await tx
+					.select({ id: artifacts.id, scope: artifacts.ownerScope, locked: artifacts.locked })
+					.from(artifacts)
+					.where(and(eq(artifacts.projectId, projectId), inArray(artifacts.id, cited)));
+				const scopeOf = new Map(rows.map((r) => [r.id, r.scope]));
+				const scopes = new Set(issue.artifactIds.map((id) => scopeOf.get(id)));
+				const [scope] = scopes;
+				if (scopes.size !== 1 || (scope !== 'A_PRIVATE' && scope !== 'B_PRIVATE')) {
+					throw new TlonError(
+						'CROSS_SIDE_REVISION',
+						'the issue spans both sides (or shared material); only one side may revise its own chain',
+						{ key: issue.key }
+					);
+				}
+				if (rows.find((r) => r.id === data.artifactId)?.locked) {
+					throw new TlonError('INVALID_STATE', 'the Block is locked', {
+						artifactId: data.artifactId
+					});
+				}
+				const [pending] = await tx
+					.select()
+					.from(protocolTasks)
+					.where(
+						and(
+							eq(protocolTasks.projectId, projectId),
+							eq(protocolTasks.type, 'revise_block'),
+							eq(protocolTasks.state, 'pending'),
+							sql`${protocolTasks.payload} @> ${JSON.stringify({
+								artifactId: data.artifactId,
+								issueKey: issue.key
+							})}::jsonb`
+						)
+					)
+					.limit(1);
+				if (pending) return toTask(pending, principal);
+
+				const [run] = await tx
+					.select({ id: protocolRuns.id })
+					.from(protocolRuns)
+					.where(eq(protocolRuns.projectId, projectId))
+					.orderBy(desc(protocolRuns.createdAt), desc(protocolRuns.id))
+					.limit(1);
+				const [stage] = await tx
+					.select({ max: max(protocolTasks.stageIndex) })
+					.from(protocolTasks)
+					.where(eq(protocolTasks.projectId, projectId));
+				const role = scope === 'A_PRIVATE' ? 'A' : 'B';
+				const task = await insertTask(ctx, tx, {
+					projectId,
+					runId: run?.id ?? null,
+					type: 'revise_block',
+					role,
+					stageIndex: (stage?.max ?? 0) + 1,
+					depth: 0,
+					openClaim: true,
+					payload: {
+						artifactId: data.artifactId,
+						issueKey: issue.key,
+						problems: [
+							{
+								explanation: issue.explanation,
+								// Quotes from the other side's Blocks never travel with the task.
+								evidence: issue.evidence
+									.filter((e) => scopeOf.get(e.artifactId) === scope)
+									.map((e) => ({ blockId: e.artifactId, quote: e.quote }))
+							}
+						],
+						instructions: data.instructions ?? null
+					}
+				});
+				await audit(ctx, tx, principal, projectId, 'revision.request', task.id, {
+					issueKey: issue.key,
+					artifactId: data.artifactId,
+					role
+				});
+				return toTask(task, principal);
+			});
+		},
+
 		async getFactRationale(
 			principal: Principal,
 			projectId: string,
@@ -1798,6 +1993,7 @@ type ProtocolBundle = Required<
 		| 'factAnchors'
 		| 'connections'
 		| 'certifications'
+		| 'findings'
 	>
 >;
 
@@ -1811,7 +2007,8 @@ export function protocolPart(bundle: ExportBundle): ProtocolBundle {
 		factRationales: bundle.factRationales ?? [],
 		factAnchors: bundle.factAnchors ?? [],
 		connections: bundle.connections ?? [],
-		certifications: bundle.certifications ?? []
+		certifications: bundle.certifications ?? [],
+		findings: bundle.findings ?? []
 	};
 }
 
@@ -1859,7 +2056,8 @@ export async function loadProtocolExport(
 		})),
 		factAnchors: anchorRows.map(toFactAnchor),
 		connections: await loadConnections(q, projectId),
-		certifications: await loadCertifications(q, projectId)
+		certifications: await loadCertifications(q, projectId),
+		findings: await loadFindings(q, projectId)
 	};
 }
 
@@ -1953,6 +2151,22 @@ export function findProtocolIntegrityIssues(whole: ExportBundle): ProtocolIssue[
 			if (!artifactIds.has(id)) issues.push({ path: at, message: 'unknown artifact', ref: id });
 		}
 	}
+	for (const task of bundle.tasks) {
+		if (task.payload && !artifactIds.has(task.payload.artifactId)) {
+			issues.push({
+				path: `tasks.${task.id}.payload`,
+				message: 'unknown artifact',
+				ref: task.payload.artifactId
+			});
+		}
+	}
+	for (const f of bundle.findings) {
+		const at = `findings.${f.id}`;
+		for (const id of f.artifactIds) {
+			if (!artifactIds.has(id)) issues.push({ path: at, message: 'unknown artifact', ref: id });
+		}
+		for (const e of f.evidence) ref(at, e);
+	}
 	return issues;
 }
 
@@ -1977,7 +2191,8 @@ export function protocolIdChecks(
 			completionCertifications,
 			completionCertifications.id,
 			bundle.certifications.map((c) => c.id)
-		]
+		],
+		['findings', continuityFindings, continuityFindings.id, bundle.findings.map((f) => f.id)]
 	];
 }
 
@@ -2056,6 +2271,25 @@ export async function insertProtocolImport(
 			updatedAt: date(t.updatedAt)
 		});
 	}
+	for (const f of bundle.findings) {
+		await q.insert(continuityFindings).values({
+			id: pid(f.id),
+			projectId,
+			kind: f.kind,
+			severity: f.severity,
+			artifactIds: f.artifactIds.map(art),
+			explanation: f.explanation,
+			evidence: f.evidence.map((e) => ({
+				artifactId: art(e.artifactId),
+				revisionId: rev(e.revisionId),
+				quote: e.quote
+			})),
+			source: f.source,
+			reviseArtifactId: f.reviseArtifactId === null ? null : art(f.reviseArtifactId),
+			actorId: f.actorId,
+			createdAt: date(f.createdAt)
+		});
+	}
 	for (const t of bundle.tasks) {
 		await q.insert(protocolTasks).values({
 			id: pid(t.id),
@@ -2070,6 +2304,18 @@ export async function insertProtocolImport(
 			triangleId: optional(t.triangleId),
 			side: t.side,
 			direction: t.direction,
+			payload: t.payload
+				? {
+						...t.payload,
+						artifactId: art(t.payload.artifactId),
+						// Issue keys embed artifact ids and `finding:<id>`; follow the remapped ids.
+						issueKey: t.payload.issueKey.replace(UUID_IN_TEXT, (id) => memo.get(id) ?? art(id)),
+						problems: t.payload.problems.map((p) => ({
+							...p,
+							evidence: p.evidence.map((e) => ({ ...e, blockId: art(e.blockId) }))
+						}))
+					}
+				: null,
 			resultRefs: t.resultRefs.map((r) => ({
 				artifactId: art(r.artifactId),
 				revisionId: rev(r.revisionId)

@@ -52,7 +52,14 @@ export const Assertion = z.object({
 	 */
 	monotonic: z.enum(['decreasing', 'non_increasing', 'increasing', 'non_decreasing']).optional(),
 	/** Unit of a numeric value (`seconds`, `metres`); values with different units never compare. */
-	unit: z.string().trim().max(40).optional()
+	unit: z.string().trim().max(40).optional(),
+	/**
+	 * A fact that holds for the whole story world whenever it is told: identity, kinship,
+	 * who wrote or received something, the date, place or count of a past event
+	 * (family.death_date = 1941-09). It cannot change off-page, so two Blocks of one side
+	 * disagreeing on it are a contradiction however far apart they are.
+	 */
+	timeless: z.boolean().default(false)
 });
 export type Assertion = z.infer<typeof Assertion>;
 export type AssertionInput = z.input<typeof Assertion>;
@@ -63,10 +70,13 @@ export type AssertionInput = z.input<typeof Assertion>;
  * `year` (calendar year) places beats of multi-era stories; `relative` keeps a relative
  * statement whose absolute date is unknown ("eleven winters before the church closed")
  * verbatim instead of guessing a year. Any field may be absent; `approx` widens
- * comparisons by `toleranceMinutes` (or one year for `year`).
+ * comparisons by `toleranceMinutes`; `yearApprox` widens the year by one.
  */
 export const BeatTime = z.object({
 	year: z.int().min(-100_000).max(100_000).optional(),
+	/** Calendar month (1–12) and day of month, when the text states them. */
+	month: z.int().min(1).max(12).optional(),
+	dayOfMonth: z.int().min(1).max(31).optional(),
 	day: z.int().min(-100_000).max(100_000).optional(),
 	minute: z
 		.int()
@@ -75,6 +85,8 @@ export const BeatTime = z.object({
 		.optional(),
 	relative: z.string().trim().max(200).optional(),
 	approx: z.boolean().default(false),
+	/** The year is inferred rather than stated: widens year comparisons by ±1 (and then months are not compared). */
+	yearApprox: z.boolean().default(false),
 	toleranceMinutes: z
 		.int()
 		.min(0)
@@ -96,7 +108,9 @@ export const EntityRef = z.object({
 	name: z.string().trim().min(1).max(120),
 	kind: z.enum(['person', 'object', 'place', 'inscription', 'phenomenon', 'group', 'other']),
 	/** What tells it apart from same-named entities (surname, surface, era). */
-	distinguishing: z.string().trim().max(200).optional()
+	distinguishing: z.string().trim().max(200).optional(),
+	/** Other names the text uses for this same entity (diminutives, patronymic forms). */
+	aliases: z.array(z.string().trim().min(1).max(120)).max(10).default([])
 });
 export type EntityRef = z.infer<typeof EntityRef>;
 
@@ -201,6 +215,15 @@ export const ISSUE_KINDS = [
 	'direction_mismatch',
 	/** Different entity ids share a display name: kept distinct, flagged for the reader. */
 	'ambiguous_entity',
+	/** Two Blocks of one side disagree on a timeless fact (kinship, authorship, a past date). */
+	'fact_conflict',
+	/**
+	 * Name variants of what may be one person carry incompatible timeless roles (mother of
+	 * X here, wife of X there), or one entity holds incompatible roles.
+	 */
+	'identity_conflict',
+	/** The annotation itself sets one key to several values in one Block (extraction shape, not story). */
+	'annotation_conflict',
 	'unknown'
 ] as const;
 export const IssueKind = z.enum(ISSUE_KINDS);
@@ -224,6 +247,12 @@ export const ValidationIssue = z.object({
 			'stop_expansion'
 		])
 		.nullable(),
+	/** replay = computed from annotations; audit = grounded finding of a continuity audit; human = reported by a facilitator. */
+	source: z.enum(['replay', 'audit', 'human']).default('replay'),
+	/** Verbatim quotes that ground the issue (required for audit/human findings). */
+	evidence: z.array(z.object({ artifactId: Uuid, quote: z.string() })).default([]),
+	/** Finding-sourced issues only: the Block the auditor judged to deviate (null otherwise). */
+	reviseArtifactId: Uuid.nullable().optional(),
 	/** Set when a human dismissed or marked this issue intentional. */
 	dismissal: z
 		.object({
@@ -249,3 +278,57 @@ export const DismissIssueInput = z.object({
 	reason: z.string().trim().min(1).max(1000)
 });
 export type DismissIssueInput = z.input<typeof DismissIssueInput>;
+
+/**
+ * A continuity problem reported by a reader — an AI continuity audit or a facilitator —
+ * rather than computed from annotations. Every finding is grounded: each quote must occur
+ * verbatim in the cited revision of a Block. A finding goes stale (hidden from open
+ * issues) once a cited Block gets a new revision; re-audit decides whether it persists.
+ */
+export const ContinuityFinding = z.object({
+	id: Uuid,
+	projectId: Uuid,
+	kind: IssueKind,
+	severity: z.enum(['blocker', 'warning', 'info']),
+	artifactIds: z.array(Uuid),
+	explanation: z.string(),
+	evidence: z.array(z.object({ artifactId: Uuid, revisionId: Uuid, quote: z.string() })),
+	source: z.enum(['audit', 'human']),
+	/** The Block the reporter judged to deviate, when stated. */
+	reviseArtifactId: Uuid.nullable(),
+	stale: z.boolean(),
+	actorId: z.string(),
+	createdAt: IsoDate
+});
+export type ContinuityFinding = z.infer<typeof ContinuityFinding>;
+
+export const CreateFindingInput = z.object({
+	kind: IssueKind,
+	severity: z.enum(['blocker', 'warning', 'info']),
+	artifactIds: z.array(Uuid).min(1).max(8),
+	explanation: z.string().trim().min(1).max(2000),
+	/** At least one verbatim quote; quotes are checked against the cited head revisions. */
+	evidence: z
+		.array(z.object({ artifactId: Uuid, quote: z.string().trim().min(3).max(400) }))
+		.min(1)
+		.max(8),
+	source: z.enum(['audit', 'human']).default('human'),
+	/** The Block the auditor judges to deviate (the one to revise); must be one of `artifactIds`. */
+	reviseArtifactId: Uuid.optional()
+});
+export type CreateFindingInput = z.input<typeof CreateFindingInput>;
+
+export const FindingList = z.object({ items: z.array(ContinuityFinding) });
+export type FindingList = z.infer<typeof FindingList>;
+
+/**
+ * Facilitator asks the owning side to repair an open issue in its own chain. Allowed only
+ * when every artifact of the issue belongs to the same private side (A or B).
+ */
+export const RequestRevisionInput = z.object({
+	issueKey: z.string().min(1).max(500),
+	/** Which of the issue's Blocks to revise. */
+	artifactId: Uuid,
+	instructions: z.string().trim().max(1000).optional()
+});
+export type RequestRevisionInput = z.input<typeof RequestRevisionInput>;

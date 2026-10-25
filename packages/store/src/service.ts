@@ -10,6 +10,8 @@ import {
 	type CompletionReport,
 	type ConnectionList,
 	type NarrativeConnection,
+	type ContinuityFinding,
+	type FindingList,
 	type CompositeRevisionList,
 	type CompositeView,
 	type AuditPage,
@@ -23,6 +25,7 @@ import {
 	type ProtocolState,
 	type Run,
 	type SubmitTaskResult,
+	type Task,
 	type TaskList,
 	type TaskView,
 	type TriangleDetail,
@@ -49,6 +52,7 @@ import { completionMethods } from './completion.ts';
 import { compositeMethods } from './composites.ts';
 import type { Db } from './db.ts';
 import { expansionMethods } from './expansions.ts';
+import { findingMethods } from './findings.ts';
 import { gatewayMethods } from './gateway.ts';
 import { auditDecision, createCtx, type Ctx, type ServiceOptions } from './internal.ts';
 import { projectMethods } from './projects.ts';
@@ -290,6 +294,16 @@ export interface TlonService {
 	listCertifications(principal: Principal, projectId: string): Promise<{ items: Certification[] }>;
 	/** HUMAN only: input manifests and server-side deny checks. */
 	getAudit(principal: Principal, projectId: string): Promise<AuditReport>;
+
+	/** HUMAN + VALIDATOR read and report; A/B/C are forbidden. Quotes must occur verbatim in the cited Blocks. */
+	listFindings(principal: Principal, projectId: string): Promise<FindingList>;
+	createFinding(
+		principal: Principal,
+		projectId: string,
+		input: unknown
+	): Promise<ContinuityFinding>;
+	/** HUMAN only: asks the owning side to repair an open side-local issue (a `revise_block` task). */
+	requestRevision(principal: Principal, projectId: string, input: unknown): Promise<Task>;
 }
 
 type Method = (principal: Principal, ...args: unknown[]) => Promise<unknown>;
@@ -361,7 +375,8 @@ export function createTlonService(db: Db, options: ServiceOptions = {}): TlonSer
 		...validationMethods(ctx),
 		...gatewayMethods(ctx),
 		...protocolMethods(ctx),
-		...completionMethods(ctx)
+		...completionMethods(ctx),
+		...findingMethods(ctx)
 	};
 	const audited: Record<string, unknown> = {};
 	for (const [name, method] of Object.entries(methods) as Array<[string, Method]>) {

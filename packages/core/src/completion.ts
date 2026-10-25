@@ -102,31 +102,40 @@ export function completionReport(input: CompletionInput): CompletionReport {
 	).length;
 	const blockers = open.filter((i) => i.severity === 'blocker').length;
 
-	const reasons: string[] = [];
 	const unintentional = openQuestions.filter((q) => !q.intentional).length;
-	const needsBlockersClear = policy !== 'exploratory';
-	if (needsBlockersClear && blockers > 0) {
-		reasons.push(`${blockers} open blocking continuity issue(s) must be resolved or dismissed.`);
-	}
-	if (policy === 'coherent_open_mystery' && unintentional > 0) {
-		reasons.push(
-			`${unintentional} open question(s) are not marked as intentional by a facilitator; approve each as a deliberate mystery or answer it.`
-		);
-	}
-	if (policy === 'causally_connected' || policy === 'resolved') {
-		if (confirmedCrossBranchCausalPaths === 'unknown') {
+	/** Why `candidate` cannot be certified now; empty = certifiable. */
+	const reasonsFor = (candidate: CompletionPolicy): string[] => {
+		const reasons: string[] = [];
+		if (blockers > 0) {
+			reasons.push(`${blockers} open blocking continuity issue(s) must be resolved or dismissed.`);
+		}
+		if (candidate === 'coherent_open_mystery' && unintentional > 0) {
 			reasons.push(
-				'Cross-branch causality is unknown: no approved connection between the A and B branches has been recorded.'
-			);
-		} else if (confirmedCrossBranchCausalPaths < 1) {
-			reasons.push(
-				'No approved causal connection (causal_canon) joins the A and B branches; a Fact link alone is not causality.'
+				`${unintentional} open question(s) are not marked as intentional by a facilitator; approve each as a deliberate mystery or answer it.`
 			);
 		}
-	}
-	if (policy === 'resolved' && openQuestions.length > 0) {
-		reasons.push(`${openQuestions.length} open question(s) remain unanswered.`);
-	}
+		if (candidate === 'causally_connected' || candidate === 'resolved') {
+			if (confirmedCrossBranchCausalPaths === 'unknown') {
+				reasons.push(
+					'Cross-branch causality is unknown: no approved connection between the A and B branches has been recorded.'
+				);
+			} else if (confirmedCrossBranchCausalPaths < 1) {
+				reasons.push(
+					'No approved causal connection (causal_canon) joins the A and B branches; a Fact link alone is not causality.'
+				);
+			}
+		}
+		if (candidate === 'resolved' && openQuestions.length > 0) {
+			reasons.push(`${openQuestions.length} open question(s) remain unanswered.`);
+		}
+		return reasons;
+	};
+	const certifiableAs: CompletionReport['certifiableAs'] = {
+		exploratory: reasonsFor('exploratory').length === 0,
+		coherent_open_mystery: reasonsFor('coherent_open_mystery').length === 0,
+		causally_connected: reasonsFor('causally_connected').length === 0,
+		resolved: reasonsFor('resolved').length === 0
+	};
 
 	return {
 		policy,
@@ -137,8 +146,9 @@ export function completionReport(input: CompletionInput): CompletionReport {
 		blockers,
 		isolationVerified: audit?.isolationVerified ?? 'unknown',
 		motifSignals: motifSignals(graph, input.transitions),
-		certifiable: reasons.length === 0,
-		reasons
+		certifiable: certifiableAs[policy],
+		reasons: reasonsFor(policy),
+		certifiableAs
 	};
 }
 

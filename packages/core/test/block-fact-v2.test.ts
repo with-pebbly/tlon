@@ -20,9 +20,11 @@ import { describe, expect, it } from 'vitest';
 import {
 	type AnnotationLike,
 	chronologicalOrder,
+	compareBeatTime,
 	type CompletionInput,
 	completionReport,
 	entityRegistry,
+	nameVariants,
 	motifSignals,
 	renderStoryMarkdown,
 	storyBeats,
@@ -160,6 +162,8 @@ const issue = (patch: Partial<ValidationIssue> & Pick<ValidationIssue, 'kind' | 
 		explanation: 'x',
 		suggestedAction: null,
 		dismissal: null,
+		source: 'replay',
+		evidence: [],
 		...patch
 	}) satisfies ValidationIssue;
 
@@ -337,7 +341,7 @@ describe('story time per side chain (BF-03, BF-04)', () => {
 			validateContinuity(
 				near.graph,
 				near.annotate({
-					'B before': { time: { year: 1964, approx: true } },
+					'B before': { time: { year: 1964, yearApprox: true } },
 					'B seed': { time: { year: 1963 } }
 				}).annotations
 			).issues
@@ -706,7 +710,7 @@ describe('rendering a Block–Fact export', () => {
 		);
 		expect(md).not.toContain('REJECTED GUESS');
 		expect(md).toContain(
-			'```yaml\npolicy: coherent_open_mystery\nconnected_fact_pairs: 1\nconfirmed_cross_branch_causal_paths: 0\nopen_questions:'
+			'```yaml\n# highest certifiable policy: coherent_open_mystery\npolicy: coherent_open_mystery\nconnected_fact_pairs: 1\nconfirmed_cross_branch_causal_paths: 0\nopen_questions:'
 		);
 		expect(md).toContain('    intentional: true');
 		expect(md).toContain('certifiable: true');
@@ -874,7 +878,7 @@ describe('completion report (BF-09, BF-10)', () => {
 		expect(report(noFact).exploratory.connectedFactPairs).toBe(0);
 	});
 
-	it('blockers gate every non-exploratory policy; dismissed issues and info do not; chronology counts warnings', () => {
+	it('open blockers gate every policy, exploratory included; dismissed issues and info do not; chronology counts warnings', () => {
 		const w = world(FOUR);
 		const mystery = connection({
 			kind: 'open_mystery',
@@ -889,7 +893,10 @@ describe('completion report (BF-09, BF-10)', () => {
 			dismissal: { resolution: 'intentional', reason: 'flashback', actorId: 'h', createdAt: at }
 		});
 		const open = report(w, { connections: [mystery], issues: [blocker, dismissed] });
-		expect(open.exploratory.certifiable).toBe(true);
+		expect(open.exploratory).toMatchObject({ certifiable: false, blockers: 1 });
+		expect(open.exploratory.reasons).toEqual([
+			'1 open blocking continuity issue(s) must be resolved or dismissed.'
+		]);
 		expect(open.coherent_open_mystery).toMatchObject({
 			certifiable: false,
 			blockers: 1,
@@ -1022,5 +1029,624 @@ describe('motif signals (advisory)', () => {
 			{ artifactId: w.id('B before'), signal: 'repeats Fact phrase verbatim' }
 		]);
 		expect(r.certifiable).toBe(true);
+	});
+});
+
+const time = (input: NonNullable<TransitionInput['time']>) =>
+	Transition.parse({ time: input }).time!;
+
+describe('calendar months in story time', () => {
+	it('orders year → month → day of month → story day → minute, comparing only stated components', () => {
+		expect(compareBeatTime(time({ year: 1941, month: 1 }), time({ year: 1941, month: 8 }))).toEqual(
+			{
+				component: 'month',
+				delta: -7
+			}
+		);
+		expect(
+			compareBeatTime(
+				time({ year: 1941, month: 8, dayOfMonth: 20 }),
+				time({ year: 1941, month: 8, dayOfMonth: 3 })
+			)
+		).toEqual({ component: 'dayOfMonth', delta: 17 });
+		// The year still decides before any month does.
+		expect(
+			compareBeatTime(time({ year: 1940, month: 12 }), time({ year: 1941, month: 1 }))
+		).toEqual({
+			component: 'year',
+			delta: -1
+		});
+		// Same calendar date: the clock orders them; the story day compares once the date is equal.
+		expect(
+			compareBeatTime(
+				time({ year: 1941, month: 8, dayOfMonth: 3, minute: 600 }),
+				time({ year: 1941, month: 8, dayOfMonth: 3, minute: 540 })
+			)
+		).toEqual({ component: 'minute', delta: 60 });
+		expect(
+			compareBeatTime(
+				time({ year: 1941, month: 8, day: 4 }),
+				time({ year: 1941, month: 8, day: 2 })
+			)
+		).toEqual({ component: 'day', delta: 2 });
+	});
+
+	it('a month is compared only when both state it, and never across an approximate year', () => {
+		expect(compareBeatTime(time({ year: 1941, month: 3 }), time({ year: 1941 }))).toEqual({
+			component: 'year',
+			delta: 0
+		});
+		expect(
+			compareBeatTime(
+				time({ year: 1941, yearApprox: true, month: 1 }),
+				time({ year: 1941, month: 8 })
+			)
+		).toEqual({ component: 'year', delta: 0 });
+		expect(
+			compareBeatTime(
+				time({ year: 1941, month: 1 }),
+				time({ year: 1941, yearApprox: true, month: 8 })
+			)
+		).toEqual({ component: 'year', delta: 0 });
+		// Clock uncertainty (approx minutes) does not blur the calendar: January still precedes August.
+		expect(
+			compareBeatTime(
+				time({ year: 1944, month: 1, approx: true, toleranceMinutes: 180 }),
+				time({ year: 1944, month: 8, approx: true, toleranceMinutes: 90 })
+			)
+		).toEqual({ component: 'month', delta: -7 });
+		// A month alone is not a date: without a shared year there is nothing to compare.
+		expect(compareBeatTime(time({ month: 1 }), time({ month: 8 }))).toBeNull();
+		// Day of month needs equal months.
+		expect(
+			compareBeatTime(
+				time({ year: 1941, month: 1, dayOfMonth: 30 }),
+				time({ year: 1941, month: 2, dayOfMonth: 2 })
+			)
+		).toEqual({ component: 'month', delta: -1 });
+	});
+
+	it('chronological order puts January before August of the same year', () => {
+		const w = world({ a: ['A seed'], b: ['B before', 'B seed'] });
+		const { transitions } = w.annotate({
+			'A seed': { time: { year: 1941, month: 8, dayOfMonth: 5 } },
+			'B seed': { time: { year: 1941, month: 1 } },
+			'B before': { time: { year: 1940 } }
+		});
+		const { dated } = chronologicalOrder(storyBeats(w.graph), transitions);
+		expect(dated.map((e) => e.beat.artifact.title)).toEqual(['B before', 'B seed', 'A seed']);
+
+		// Without the months the two 1941 Blocks tie and fall back to the reading order.
+		const bare = w.annotate({
+			'A seed': { time: { year: 1941 } },
+			'B seed': { time: { year: 1941 } }
+		});
+		expect(
+			chronologicalOrder(storyBeats(w.graph), bare.transitions).dated.map(
+				(e) => e.beat.artifact.title
+			)
+		).toEqual(['A seed', 'B seed']);
+	});
+
+	it('direction_mismatch sees a month: a backward Block written for September before a February seed', () => {
+		const w = world(FOUR);
+		const { annotations } = w.annotate({
+			'B seed': { time: { year: 1941, month: 2 } },
+			'B before': { time: { year: 1941, month: 9 } }
+		});
+		const { issues } = validateContinuity(w.graph, annotations);
+		expect(kinds(issues)).toEqual(['direction_mismatch/warning']);
+		expect(issues[0]!.explanation).toContain('1941-09');
+		expect(issues[0]!.explanation).toContain('1941-02');
+
+		const ok = w.annotate({
+			'B seed': { time: { year: 1941, month: 9 } },
+			'B before': { time: { year: 1941, month: 2 } }
+		});
+		expect(validateContinuity(w.graph, ok.annotations).issues).toEqual([]);
+	});
+
+	it('prints the calendar date on annotated beats', () => {
+		const w = world(FOUR);
+		const { transitions } = w.annotate({
+			'A seed': { time: { year: 1941, month: 8, dayOfMonth: 3 } },
+			'A after': { time: { month: 9 } }
+		});
+		const md = renderStoryMarkdown(w.graph, { annotations: true, transitions });
+		expect(md).toContain('> **Story time:** 1941-08-03');
+		expect(md).toContain('> **Story time:** month 9');
+	});
+});
+
+describe('timeless facts (fact_conflict)', () => {
+	const B_CHAIN = { a: ['A seed'], b: ['B one', 'B two', 'B three', 'B seed'] };
+	const death = (value: string) => s('family', 'death_date', value, { timeless: true });
+
+	it('two Blocks of one side disagreeing on a timeless fact are a blocker, however far apart', () => {
+		const w = world(B_CHAIN);
+		const { annotations } = w.annotate({
+			'B one': { effects: [death('november_1941')], time: { year: 1941, month: 11 } },
+			'B two': {},
+			'B three': {},
+			'B seed': { effects: [death('september_1941')], time: { year: 1980 } }
+		});
+		const { issues } = validateContinuity(w.graph, annotations);
+		expect(kinds(issues)).toEqual(['fact_conflict/blocker']);
+		const conflict = issues[0]!;
+		expect(conflict.stateKey).toBe('family.death_date');
+		expect(conflict.artifactIds.toSorted()).toEqual([w.id('B one'), w.id('B seed')].toSorted());
+		expect(conflict.explanation).toContain('november_1941');
+		expect(conflict.explanation).toContain('september_1941');
+		expect(conflict.source).toBe('replay');
+		expect(conflict.evidence).toEqual([]);
+	});
+
+	it('the same state, not timeless, across that gap is only a missing transition', () => {
+		const w = world(B_CHAIN);
+		const state = (value: string) => s('family', 'status', value);
+		const { annotations } = w.annotate({
+			'B one': { effects: [state('alive')] },
+			'B two': {},
+			'B seed': { preconditions: [state('dead')] }
+		});
+		expect(kinds(validateContinuity(w.graph, annotations).issues)).toEqual([
+			'missing_transition/warning'
+		]);
+	});
+
+	it('timeless assertions never enter the state replay and may also be stated as preconditions', () => {
+		const w = world(B_CHAIN);
+		const { annotations } = w.annotate({
+			'B one': { preconditions: [death('september_1941')] },
+			'B two': { effects: [death('september_1941')] },
+			'B three': { preconditions: [death('september_1941')] }
+		});
+		expect(validateContinuity(w.graph, annotations).issues).toEqual([]);
+
+		const conflicting = w.annotate({
+			'B one': { effects: [death('september_1941')] },
+			'B three': { preconditions: [death('november_1941')] }
+		});
+		expect(kinds(validateContinuity(w.graph, conflicting.annotations).issues)).toEqual([
+			'fact_conflict/blocker'
+		]);
+	});
+
+	it('A and B are separate worlds: a timeless fact differing across sides is no conflict', () => {
+		const w = world(FOUR);
+		const { annotations } = w.annotate({
+			'A seed': { effects: [death('november_1941')] },
+			'B seed': { effects: [death('september_1941')] }
+		});
+		expect(validateContinuity(w.graph, annotations).issues).toEqual([]);
+	});
+
+	it('legacy: independent anchors disagreeing stay a tension; one creator contradicting itself is a blocker', () => {
+		const w = world({ ...FOUR, legacy: true });
+		const independent = w.annotate({
+			'A after': { effects: [death('november_1941')] },
+			'B seed': { effects: [death('september_1941')] }
+		});
+		const { issues } = validateContinuity(w.graph, independent.annotations);
+		expect(kinds(issues)).toEqual(['tension/info']);
+		expect(issues[0]!.explanation).toContain('november_1941');
+
+		const sameAuthor = w.annotate({
+			'A seed': { effects: [death('november_1941')] },
+			'A after': { effects: [death('september_1941')] }
+		});
+		expect(kinds(validateContinuity(w.graph, sameAuthor.annotations).issues)).toEqual([
+			'fact_conflict/blocker'
+		]);
+	});
+
+	it('a belief marked timeless is still only a belief', () => {
+		const w = world(FOUR);
+		const { annotations } = w.annotate({
+			'A seed': {
+				effects: [
+					s('family', 'death_date', 'november_1941', {
+						timeless: true,
+						epistemic: 'belief',
+						holder: 'Hanna'
+					})
+				]
+			},
+			'A after': {
+				effects: [
+					s('family', 'death_date', 'september_1941', {
+						timeless: true,
+						epistemic: 'belief',
+						holder: 'Hanna'
+					})
+				]
+			}
+		});
+		expect(validateContinuity(w.graph, annotations).issues).toEqual([]);
+	});
+});
+
+describe('annotation_conflict', () => {
+	const knows = (value: string) => s('nina_lapteva', 'knows', value);
+
+	it('regression: one Block setting a key to two values neither sets state nor raises a blocker downstream', () => {
+		const w = world(FOUR);
+		const { annotations } = w.annotate({
+			'A seed': { effects: [knows('key_missing'), knows('petr_envelopes')] },
+			'A after': { preconditions: [knows('key_missing')] }
+		});
+		const { issues } = validateContinuity(w.graph, annotations);
+		expect(kinds(issues)).toEqual(['annotation_conflict/info']);
+		expect(issues[0]).toMatchObject({
+			stateKey: 'nina_lapteva.knows',
+			suggestedAction: 'keep_as_is',
+			artifactIds: [w.id('A seed')]
+		});
+		expect(issues[0]!.explanation).toContain('key_missing and petr_envelopes');
+
+		// Control: the unambiguous annotation does expose the gap to the next Block.
+		const clear = w.annotate({
+			'A seed': { effects: [knows('petr_envelopes')] },
+			'A after': { preconditions: [knows('key_missing')] }
+		});
+		expect(kinds(validateContinuity(w.graph, clear.annotations).issues)).toEqual([
+			'missing_transition/warning'
+		]);
+	});
+
+	it('an ambiguous effect also forgets the earlier holder, so nothing downstream is judged against it', () => {
+		const w = world({ a: ['A seed', 'A mid', 'A after'], b: ['B before', 'B seed'] });
+		const { annotations } = w.annotate({
+			'A seed': { effects: [knows('petr_envelopes')], time: { day: 1, minute: 600 } },
+			'A mid': {
+				effects: [knows('key_missing'), knows('key_found')],
+				time: { day: 1, minute: 610 }
+			},
+			'A after': { preconditions: [knows('key_missing')], time: { day: 1, minute: 620 } }
+		});
+		expect(kinds(validateContinuity(w.graph, annotations).issues)).toEqual([
+			'annotation_conflict/info'
+		]);
+	});
+
+	it('is also raised for preconditions and for timeless assertions, and stays a single info per key', () => {
+		const w = world(FOUR);
+		const { annotations } = w.annotate({
+			'A seed': { preconditions: [knows('a'), knows('b')] },
+			'A after': {
+				effects: [
+					s('family', 'death_date', 'november_1941', { timeless: true }),
+					s('family', 'death_date', 'september_1941', { timeless: true })
+				]
+			},
+			'B seed': {
+				effects: [knows('x'), knows('y')],
+				preconditions: [knows('x'), knows('y')]
+			}
+		});
+		const { issues } = validateContinuity(w.graph, annotations);
+		expect(kinds(issues)).toEqual([
+			'annotation_conflict/info',
+			'annotation_conflict/info',
+			'annotation_conflict/info'
+		]);
+		expect(issues.map((i) => i.stateKey).toSorted()).toEqual([
+			'family.death_date',
+			'nina_lapteva.knows',
+			'nina_lapteva.knows'
+		]);
+	});
+
+	it('beliefs of different holders and repeated equal values are not an annotation shape problem', () => {
+		const w = world(FOUR);
+		const { annotations } = w.annotate({
+			'A seed': {
+				effects: [
+					s('door', 'locked', 'yes', { epistemic: 'belief', holder: 'Ilse' }),
+					s('door', 'locked', 'no', { epistemic: 'belief', holder: 'Pavel' }),
+					knows('key_missing'),
+					knows('key_missing')
+				]
+			}
+		});
+		expect(kinds(validateContinuity(w.graph, annotations).issues)).toEqual([
+			'perspective_conflict/info'
+		]);
+	});
+});
+
+describe('identity_conflict', () => {
+	const person = (id: string, name: string, aliases: string[] = []) => ({
+		id,
+		name,
+		kind: 'person' as const,
+		aliases
+	});
+	const kin = (subject: string, predicate: string, value: string) =>
+		s(subject, predicate, value, { timeless: true });
+	const yakov = person('yakov', 'Яков');
+
+	it('Yakov’s mother is Ривка in one Block, his wife Рива in another: name variants in incompatible roles', () => {
+		const w = world({ a: ['A seed'], b: ['B one', 'B two', 'B seed'] });
+		const { annotations } = w.annotate({
+			'B one': {
+				entities: [person('rivka_shulman', 'Ривка'), yakov],
+				effects: [kin('yakov', 'mother', 'rivka_shulman')]
+			},
+			'B seed': {
+				entities: [person('riva_shulman', 'Рива'), yakov],
+				effects: [kin('yakov', 'wife', 'riva_shulman')]
+			}
+		});
+		const { issues } = validateContinuity(w.graph, annotations);
+		expect(kinds(issues)).toEqual(['identity_conflict/warning']);
+		const conflict = issues[0]!;
+		expect(conflict.suggestedAction).toBe('revise_bridge');
+		expect(conflict.artifactIds.toSorted()).toEqual([w.id('B one'), w.id('B seed')].toSorted());
+		expect(conflict.explanation).toContain('Ривка');
+		expect(conflict.explanation).toContain('Рива');
+		expect(conflict.explanation).toContain('never merged');
+		// Never merged: the registry still holds three entities.
+		expect(
+			entityRegistry(
+				[...annotations].map(([artifactId, a]) => ({ artifactId, transition: a.transition }))
+			)
+				.map((e) => e.id)
+				.toSorted()
+		).toEqual(['riva_shulman', 'rivka_shulman', 'yakov']);
+	});
+
+	it('the same relative in two roles is flagged, and names match through aliases (also feeding ambiguous_entity)', () => {
+		const w = world(FOUR);
+		const same = w.annotate({
+			'A seed': {
+				entities: [person('rivka', 'Ривка'), yakov],
+				effects: [kin('yakov', 'mother', 'rivka')]
+			},
+			'A after': { effects: [kin('yakov', 'wife', 'rivka')] }
+		});
+		expect(kinds(validateContinuity(w.graph, same.annotations).issues)).toEqual([
+			'identity_conflict/warning'
+		]);
+
+		const aliased = w.annotate({
+			'A seed': {
+				entities: [person('ganna_a', 'Ганна Петровна'), yakov],
+				effects: [kin('yakov', 'mother', 'ganna_a')]
+			},
+			'A after': {
+				entities: [person('anna_b', 'Анна', ['Ганна Петровна'])],
+				effects: [kin('yakov', 'wife', 'anna_b')]
+			}
+		});
+		expect(kinds(validateContinuity(w.graph, aliased.annotations).issues).toSorted()).toEqual([
+			'ambiguous_entity/info',
+			'identity_conflict/warning'
+		]);
+	});
+
+	it('distinct-name relatives, a person with two children, and fiancee → wife raise nothing', () => {
+		const w = world(FOUR);
+		const distinct = w.annotate({
+			'A seed': {
+				entities: [person('anna', 'Анна'), yakov],
+				effects: [kin('yakov', 'mother', 'anna')]
+			},
+			'A after': {
+				entities: [person('maria', 'Мария')],
+				effects: [kin('yakov', 'wife', 'maria')]
+			}
+		});
+		expect(validateContinuity(w.graph, distinct.annotations).issues).toEqual([]);
+
+		// Children carry their own single-valued `mother` key: no multi-valued predicate exists.
+		const children = w.annotate({
+			'A seed': {
+				entities: [person('rivka', 'Ривка'), person('yakov', 'Яков')],
+				effects: [kin('yakov', 'mother', 'rivka')]
+			},
+			'A after': {
+				entities: [person('sarra', 'Сарра')],
+				effects: [kin('sarra', 'mother', 'rivka')]
+			}
+		});
+		expect(validateContinuity(w.graph, children.annotations).issues).toEqual([]);
+
+		const engaged = w.annotate({
+			'A seed': {
+				entities: [person('riva', 'Рива'), yakov],
+				effects: [kin('yakov', 'fiancee', 'riva')]
+			},
+			'A after': { effects: [kin('yakov', 'wife', 'riva')] }
+		});
+		expect(validateContinuity(w.graph, engaged.annotations).issues).toEqual([]);
+		const grooms = w.annotate({
+			'A seed': {
+				entities: [person('yakov', 'Яков'), person('riva', 'Рива')],
+				effects: [kin('riva', 'fiance', 'yakov')]
+			},
+			'A after': { effects: [kin('riva', 'husband', 'yakov')] }
+		});
+		expect(validateContinuity(w.graph, grooms.annotations).issues).toEqual([]);
+	});
+
+	it('a different value for one kinship key is a fact_conflict, not an identity_conflict', () => {
+		const w = world({ a: ['A seed'], b: ['B one', 'B two', 'B seed'] });
+		const { annotations } = w.annotate({
+			'B one': { effects: [kin('yakov', 'mother', 'rivka_shulman')] },
+			'B seed': { effects: [kin('yakov', 'mother', 'hanna')] }
+		});
+		expect(kinds(validateContinuity(w.graph, annotations).issues)).toEqual([
+			'fact_conflict/blocker'
+		]);
+	});
+
+	it('kinship across the A and B worlds is not compared', () => {
+		const w = world(FOUR);
+		const { annotations } = w.annotate({
+			'A seed': {
+				entities: [person('rivka', 'Ривка'), yakov],
+				effects: [kin('yakov', 'mother', 'rivka')]
+			},
+			'B seed': {
+				entities: [person('riva', 'Рива'), yakov],
+				effects: [kin('yakov', 'wife', 'riva')]
+			}
+		});
+		expect(validateContinuity(w.graph, annotations).issues).toEqual([]);
+	});
+
+	it('nameVariants: equal after normalisation, or one edit between names of four letters or more', () => {
+		const name = (n: string, aliases: string[] = []) => ({ name: n, aliases });
+		expect(nameVariants(name('Ривка'), name('Рива'))).toBe(true);
+		expect(nameVariants(name('Ёлка'), name('елка'))).toBe(true);
+		expect(nameVariants(name('Анна'), name('Ганна'))).toBe(false);
+		expect(nameVariants(name('Ной'), name('Нон'))).toBe(false);
+		expect(nameVariants(name('Яков'), name('Мария'))).toBe(false);
+		expect(nameVariants(name('Рива'), name('Ривка Абрамовна', ['Ривка']))).toBe(true);
+	});
+});
+
+describe('certifiableAs and the continuity section of the story export', () => {
+	const run = (
+		w: { graph: CompletionInput['graph'] },
+		policy: CompletionPolicy,
+		over: Partial<CompletionInput> = {}
+	) =>
+		completionReport({ graph: w.graph, connections: [], issues: [], audit: null, ...over, policy });
+	const POLICIES = [
+		'exploratory',
+		'coherent_open_mystery',
+		'causally_connected',
+		'resolved'
+	] as const;
+
+	it('without blockers: exploratory only, until the facilitator decides the open question', () => {
+		const w = world(FOUR);
+		expect(run(w, 'exploratory').certifiableAs).toEqual({
+			exploratory: true,
+			coherent_open_mystery: false,
+			causally_connected: false,
+			resolved: false
+		});
+		const canon = connection({
+			kind: 'causal_canon',
+			endpointIds: [w.aSeed.id, w.bSeed.id],
+			factArtifactId: w.factId,
+			approvedBy: 'f'
+		});
+		const decided = run(w, 'resolved', { connections: [canon] });
+		expect(decided.certifiableAs).toEqual({
+			exploratory: true,
+			coherent_open_mystery: true,
+			causally_connected: true,
+			resolved: true
+		});
+	});
+
+	it('an open blocker withdraws every policy; certifiable follows the requested one', () => {
+		const w = world(FOUR);
+		const canon = connection({
+			kind: 'causal_canon',
+			endpointIds: [w.aSeed.id, w.bSeed.id],
+			factArtifactId: w.factId,
+			approvedBy: 'f'
+		});
+		const blocker = issue({ kind: 'fact_conflict', severity: 'blocker' });
+		for (const policy of POLICIES) {
+			const r = run(w, policy, { connections: [canon], issues: [blocker] });
+			expect(r.certifiableAs).toEqual({
+				exploratory: false,
+				coherent_open_mystery: false,
+				causally_connected: false,
+				resolved: false
+			});
+			expect(r.certifiable).toBe(false);
+			expect(r.reasons[0]).toBe(
+				'1 open blocking continuity issue(s) must be resolved or dismissed.'
+			);
+		}
+		// Dismissing it restores them; a warning never blocks.
+		const dismissed = {
+			...blocker,
+			dismissal: { resolution: 'intentional' as const, reason: 'ok', actorId: 'h', createdAt: at }
+		};
+		const warning = issue({ kind: 'identity_conflict', severity: 'warning' });
+		const r = run(w, 'causally_connected', {
+			connections: [canon],
+			issues: [dismissed, warning]
+		});
+		expect(r.certifiable).toBe(true);
+		expect(r.certifiableAs).toEqual({
+			exploratory: true,
+			coherent_open_mystery: true,
+			causally_connected: true,
+			resolved: true
+		});
+	});
+
+	it('the exploratory policy no longer certifies a story with unconfirmed causality and a broken chain', () => {
+		const w = world(FOUR);
+		const r = run(w, 'exploratory', {
+			issues: [issue({ kind: 'fact_conflict', severity: 'blocker' })]
+		});
+		expect(r).toMatchObject({ certifiable: false, blockers: 1 });
+		expect(r.confirmedCrossBranchCausalPaths).toBe('unknown');
+	});
+
+	it('renders open issues with Block numbers and evidence, and the highest certifiable policy', () => {
+		const w = world(FOUR);
+		const a = w.id('A seed');
+		const b = w.id('B seed');
+		const open = issue({
+			kind: 'fact_conflict',
+			severity: 'blocker',
+			artifactIds: [a, b],
+			explanation: 'death_date differs',
+			source: 'audit',
+			evidence: [
+				{ artifactId: a, quote: 'в ноябре  сорок первого' },
+				{ artifactId: b, quote: 'в сентябре' }
+			]
+		});
+		const warning = issue({
+			kind: 'identity_conflict',
+			severity: 'warning',
+			artifactIds: [w.id('A after')],
+			explanation: 'Ривка or Рива'
+		});
+		const dismissed = issue({
+			kind: 'continuity_violation',
+			severity: 'blocker',
+			explanation: 'DISMISSED ONE',
+			dismissal: { resolution: 'dismissed', reason: 'r', actorId: 'h', createdAt: at }
+		});
+		const info = issue({ kind: 'ambiguous_entity', severity: 'info', explanation: 'INFO ONE' });
+		const issues = [warning, open, dismissed, info];
+		const completion = run(w, 'exploratory', { issues });
+		const md = renderStoryMarkdown(w.graph, { annotations: true, completion, issues });
+		expect(md).toContain('## Continuity issues (organizer)');
+		expect(md).toContain(
+			'- **fact_conflict** (blocker; source: audit) — #1, #4: death_date differs'
+		);
+		expect(md).toContain('  > «в ноябре сорок первого» — #1');
+		expect(md).toContain('  > «в сентябре» — #4');
+		expect(md).toContain('- **identity_conflict** (warning; source: replay) — #2: Ривка or Рива');
+		expect(md.indexOf('**fact_conflict**')).toBeLessThan(md.indexOf('**identity_conflict**'));
+		expect(md).not.toContain('DISMISSED ONE');
+		expect(md).not.toContain('INFO ONE');
+		expect(md).toContain('```yaml\n# highest certifiable policy: none\npolicy: exploratory');
+		expect(md).toContain(
+			'certifiable: false\ncertifiable_as:\n  exploratory: false\n  coherent_open_mystery: false\n  causally_connected: false\n  resolved: false'
+		);
+
+		const clean = renderStoryMarkdown(w.graph, {
+			completion: run(w, 'exploratory'),
+			issues: []
+		});
+		expect(clean).toContain('_No open blocking or warning issues._');
+		expect(clean).toContain('# highest certifiable policy: exploratory');
+		// Without the option the section is absent.
+		expect(renderStoryMarkdown(w.graph)).not.toContain('Continuity issues');
 	});
 });

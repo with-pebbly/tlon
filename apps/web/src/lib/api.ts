@@ -13,6 +13,10 @@ import {
 	type CreateArtifactInput,
 	type DismissIssueInput,
 	type IssueList,
+	type ContinuityFinding,
+	type CreateFindingInput,
+	type RequestRevisionInput,
+	type Task,
 	type PutTransitionInput,
 	type TransitionAnnotation,
 	type CreateCompositeInput,
@@ -231,6 +235,19 @@ export const api = {
 	/** Records a dismissal by issue key; returns the recomputed list. */
 	dismissIssue: (projectId: string, input: DismissIssueInput) =>
 		request<IssueList>(`${p(projectId)}/issues/dismiss`, { method: 'POST', body: input }),
+	/**
+	 * Facilitator finding; every quote must occur verbatim in the cited Block's head
+	 * revision, else 422 UNGROUNDED_QUOTE with `details.ungrounded: [{artifactId, quote}]`.
+	 */
+	createFinding: (projectId: string, input: CreateFindingInput) =>
+		request<ContinuityFinding>(`${p(projectId)}/findings`, { method: 'POST', body: input }),
+	/**
+	 * Asks the owning side (A or B) to revise one Block of an open issue: returns the
+	 * `revise_block` task (an existing pending one for the same Block and issue is reused).
+	 * 422 CROSS_SIDE_REVISION when the issue spans both sides.
+	 */
+	requestRevision: (projectId: string, input: RequestRevisionInput) =>
+		request<Task>(`${p(projectId)}/issues/request-revision`, { method: 'POST', body: input }),
 
 	createRelation: (projectId: string, input: CreateRelationInput) =>
 		request<Relation>(`${p(projectId)}/relations`, { method: 'POST', body: input }),

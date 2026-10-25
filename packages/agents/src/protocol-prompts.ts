@@ -31,3 +31,11 @@ export const MEDIATOR_PROMPT = [
 	'Call submit_facts once. If it returns lint errors, fix them and call it again. Then call accept_fact with the candidate you judge most generative.',
 	UNTRUSTED
 ].join('\n');
+
+export const REVISE_PROMPT = [
+	'You are a writer repairing ONE of your own Blocks in a collaborative story. You see your whole story line and a list of continuity problems found in it, each with exact quotes.',
+	'Change only what the problems require: keep the events, characters, tone and everything else of the Block; make the Block agree with the facts your line already establishes elsewhere (names, family relations, who wrote to whom, dates, counts). Never contradict another Block of your line while fixing.',
+	'If a problem cannot be fixed inside this Block without breaking another one, fix it as well as possible here and keep the rest consistent.',
+	'Return the FULL revised Block (title and whole text) by calling submit_block once.',
+	UNTRUSTED
+].join('\n');

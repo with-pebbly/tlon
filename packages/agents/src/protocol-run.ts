@@ -19,40 +19,26 @@
  *          [--out ~/Desktop/story.md] [--review] [--skip-analyze]
  */
 import { spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { mkdtempSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 
-import {
-	AgentRegistry,
-	type CustomTool,
-	createAgentSession,
-	discoverAuthStorage,
-	ModelRegistry,
-	SessionManager,
-	Settings,
-	z
-} from '@oh-my-pi/pi-coding-agent';
+import { discoverAuthStorage, ModelRegistry } from '@oh-my-pi/pi-coding-agent';
 
 import {
-	ApiErrorBody,
 	type AgentRole,
 	ParticipantLink,
 	Project,
 	ProjectGraph,
 	ProtocolState,
 	Run,
-	SubmitTaskResult,
 	type Task,
 	TaskList,
-	TaskView,
 	TriangleDetail
 } from '../../contracts/src/index.ts';
 import { renderStoryMarkdown, storyBeats } from '../../core/src/index.ts';
-import { ADVANCE_PROMPT, MEDIATOR_PROMPT, SEED_PROMPT } from './protocol-prompts.ts';
+import { apiClient, executeTask } from './participant.ts';
 
 const { values } = parseArgs({
 	options: {
@@ -73,39 +59,7 @@ const target = Number(values.target);
 const maxDepth = Number(values['max-depth']);
 const title = values.title ?? `${values.start} … ${values.end}`;
 
-class ApiError extends Error {
-	readonly code: string;
-	constructor(code: string, message: string) {
-		super(`${code}: ${message}`);
-		this.code = code;
-	}
-}
-
-/** One HTTP call; `token` = participant identity, absent = facilitator (operator). */
-async function call<T>(
-	method: string,
-	path: string,
-	schema: { parse(v: unknown): T },
-	body?: unknown,
-	token?: string
-): Promise<T> {
-	const response = await fetch(`${api}/api${path}`, {
-		method,
-		headers: {
-			...(token ? { authorization: `Bearer ${token}` } : {}),
-			...(body === undefined ? {} : { 'content-type': 'application/json' })
-		},
-		body: body === undefined ? undefined : JSON.stringify(body)
-	});
-	const json: unknown = response.status === 204 ? null : await response.json();
-	if (!response.ok) {
-		const parsed = ApiErrorBody.safeParse(json);
-		throw parsed.success
-			? new ApiError(parsed.data.error.code, parsed.data.error.message)
-			: new ApiError('INTERNAL', `HTTP ${response.status}`);
-	}
-	return schema.parse(json);
-}
+const call = apiClient(api);
 
 const authStorage = await discoverAuthStorage();
 const modelRegistry = new ModelRegistry(authStorage);
@@ -142,205 +96,25 @@ console.log(`project ${project.id}\n  ${api.replace(/:\d+$/, ':5173')}/projects/
 const deliveredViews: Record<'A' | 'B' | 'C', string[]> = { A: [], B: [], C: [] };
 const errors: string[] = [];
 
-// ── participant execution (isolated sessions) ───────────────────────────────
+// ── participant execution (isolated sessions, see participant.ts) ───────────
 async function execute(role: 'A' | 'B' | 'C', task: Task): Promise<void> {
-	const token = links[role].token;
-	const view = await call('GET', `${P}/tasks/${task.id}/view`, TaskView, undefined, token);
-	deliveredViews[role].push(JSON.stringify(view));
-	const idempotencyKey = randomUUID();
-	const text = (v: unknown) => ({
-		content: [{ type: 'text' as const, text: JSON.stringify(v) }],
-		details: undefined
-	});
-
-	const BlockParams = z.object({
-		kind: z.enum(['EVENT', 'STATE', 'SCENE', 'BELIEF', 'GOAL']).optional(),
-		title: z.string().min(1).max(300),
-		body: z.string().min(1).max(8000)
-	});
-	const submitBlock: CustomTool = {
-		name: 'submit_block',
-		label: 'Submit Block',
-		loadMode: 'essential',
-		approval: 'write',
-		description: 'Submit your Block for this task (once).',
-		parameters: BlockParams,
-		async execute(_id, params) {
-			const p = BlockParams.parse(params);
-			const result = await call(
-				'POST',
-				`${P}/tasks/${task.id}/submit`,
-				SubmitTaskResult,
-				{
-					idempotencyKey,
-					submission: {
-						type: view.type,
-						block: { kind: p.kind ?? 'EVENT', title: p.title, body: p.body }
-					}
-				},
-				token
-			);
-			return text({ submitted: true, state: result.task.state });
-		}
-	};
-	const FactsParams = z.object({
-		candidates: z
-			.array(
-				z.object({
-					kind: z.enum([
-						'object',
-						'person',
-						'place',
-						'rule',
-						'signal',
-						'trace',
-						'document',
-						'need',
-						'constraint',
-						'belief',
-						'damage',
-						'resource',
-						'relationship',
-						'other'
-					]),
-					text: z.string().min(1).max(400),
-					rationale: z.string().max(2000).optional()
-				})
-			)
-			.min(1)
-			.max(5)
-	});
-	let proposedFactIds: string[] = [];
-	const submitFacts: CustomTool = {
-		name: 'submit_facts',
-		label: 'Submit Fact candidates',
-		loadMode: 'essential',
-		approval: 'write',
-		description:
-			'Submit 1–5 candidate Facts. Returns their ids and lint warnings; a Fact longer than 4 words or with punctuation inside is rejected with an error.',
-		parameters: FactsParams,
-		async execute(_id, params) {
-			const p = FactsParams.parse(params);
-			const result = await call(
-				'POST',
-				`${P}/tasks/${task.id}/submit`,
-				SubmitTaskResult,
-				{
-					idempotencyKey: randomUUID(),
-					submission: { type: 'propose_fact', candidates: p.candidates }
-				},
-				token
-			);
-			proposedFactIds = result.task.resultRefs.map((r) => r.artifactId);
-			return text({
-				factIds: proposedFactIds,
-				candidates: p.candidates.map((c, i) => ({ factId: proposedFactIds[i], text: c.text })),
-				warnings: result.warnings
-			});
-		}
-	};
-	const AcceptParams = z.object({ factId: z.string() });
-	const acceptFact: CustomTool = {
-		name: 'accept_fact',
-		label: 'Accept a Fact',
-		loadMode: 'essential',
-		approval: 'write',
-		description:
-			'Accept one of your submitted candidates by its factId (it is then disclosed to the writers).',
-		parameters: AcceptParams,
-		async execute(_id, params) {
-			const { factId } = AcceptParams.parse(params);
-			if (!task.triangleId) throw new Error('task has no triangle');
-			const detail = await call(
-				'GET',
-				`${P}/triangles/${task.triangleId}`,
-				TriangleDetail,
-				undefined,
-				token
-			);
-			const candidate = detail.candidates.find((c) => c.fact.artifactId === factId);
-			if (!candidate) throw new Error('unknown factId; use an id returned by submit_facts');
-			await call(
-				'POST',
-				`${P}/triangles/${task.triangleId}/accept-fact`,
-				TriangleDetail,
-				{ candidateId: candidate.id },
-				token
-			);
-			return text({ accepted: factId });
-		}
-	};
-
-	const [tools, system, prompt] =
-		view.type === 'seed_block'
-			? [[submitBlock], SEED_PROMPT, `Your brief: ${view.brief}`]
-			: view.type === 'advance_block'
-				? [
-						[submitBlock],
-						ADVANCE_PROMPT,
-						JSON.stringify(
-							{
-								yourBlock: view.ownBlock,
-								localContext: view.localContext,
-								fact: view.fact,
-								direction: view.direction
-							},
-							null,
-							1
-						)
-					]
-				: [
-						values.review ? [submitFacts] : [submitFacts, acceptFact],
-						MEDIATOR_PROMPT +
-							(values.review
-								? '\nThe facilitator chooses among your candidates; do not try to accept one.'
-								: ''),
-						JSON.stringify(
-							{
-								left: view.left,
-								right: view.right,
-								alreadyUsedFacts: view.existingFacts,
-								policy: view.policy
-							},
-							null,
-							1
-						)
-					];
-
-	const { session } = await createAgentSession({
-		cwd: mkdtempSync(join(tmpdir(), `tlon-${role}-`)),
+	const view = await executeTask({
+		call,
+		projectId: project.id,
+		token: links[role].token,
+		role,
+		task,
 		authStorage,
 		modelRegistry,
-		modelPattern: process.env.TLON_AGENT_MODEL,
-		settings: Settings.isolated({ 'memory.backend': 'off', 'autolearn.enabled': false }),
-		sessionManager: SessionManager.inMemory(),
-		agentRegistry: new AgentRegistry(),
-		bindProcessState: false,
-		customTools: tools,
-		allowRestrictedCustomTools: true,
-		toolNames: tools.map((t) => t.name),
-		restrictToolNames: true,
-		enableMCP: false,
-		enableLsp: false,
-		disableExtensionDiscovery: true,
-		skills: [],
-		contextFiles: [],
-		systemPrompt: [system]
-	});
-	session.subscribe((e) => {
-		if (e.type === 'tool_execution_end' && e.isError) {
-			const detail = JSON.stringify(e.result).slice(0, 240);
-			errors.push(`[${role}] ${e.toolName}: ${detail}`);
-			console.log(`  [${role}] ✗ ${e.toolName} ${detail}`);
+		facilitatorReview: values.review,
+		onError: (message) => {
+			errors.push(message);
+			console.log(`  ✗ ${message}`);
 		}
 	});
-	try {
-		await session.prompt(prompt);
-	} finally {
-		await session.dispose();
-	}
+	deliveredViews[role].push(view);
 	// A/B task views carry scrubbed stage/depth (ADR 0012), so only C's stage is real.
-	console.log(`  [${role}] ${view.type}${role === 'C' ? ` (stage ${task.stageIndex})` : ''} done`);
+	console.log(`  [${role}] ${task.type}${role === 'C' ? ` (stage ${task.stageIndex})` : ''} done`);
 }
 
 /** Runs every pending task of every participant, in parallel across roles. */

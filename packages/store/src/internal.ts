@@ -74,6 +74,7 @@ const READ_ACTIONS: readonly GatewayAction[] = [
 	'export',
 	'connection.read',
 	'completion.read',
+	'finding.read',
 	'audit.read'
 ];
 

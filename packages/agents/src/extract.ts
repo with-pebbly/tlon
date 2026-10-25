@@ -26,10 +26,14 @@ import { storyBeats } from '../../core/src/index.ts';
 import { extractTransitions, vocabularyOf } from './extraction.ts';
 import { GatewayClient } from './gateway-tools.ts';
 
+const SIDE: Record<string, string> = { A_PRIVATE: 'A', B_PRIVATE: 'B' };
+
 const { values } = parseArgs({
 	options: {
 		project: { type: 'string' },
 		'only-missing': { type: 'boolean', default: false },
+		/** Missing annotations plus annotations of an older revision (after a repair). */
+		'only-stale': { type: 'boolean', default: false },
 		report: { type: 'string' },
 		api: { type: 'string', default: process.env.TLON_API_URL ?? 'http://127.0.0.1:3001' }
 	}
@@ -64,9 +68,15 @@ async function operator<T>(
 const graph = await operator('GET', '/graph', ProjectGraph);
 // Block–Fact projects: triangles define the reading order (Facts are never beats).
 const { triangles } = await operator('GET', '/protocol', ProtocolState);
-const annotated = new Set(graph.transitions.map((t) => t.artifactId));
+const annotatedRevision = new Map(
+	graph.transitions.map((t) => [t.artifactId, t.artifactRevisionId])
+);
 const beats = storyBeats({ ...graph, triangles });
-const todo = beats.filter((b) => !values['only-missing'] || !annotated.has(b.artifact.id));
+const todo = beats.filter((b) =>
+	values['only-stale']
+		? annotatedRevision.get(b.artifact.id) !== b.artifact.headRevisionId
+		: !values['only-missing'] || !annotatedRevision.has(b.artifact.id)
+);
 console.log(`${beats.length} beats in story order, ${todo.length} to annotate`);
 
 // The validator principal reads through the gateway with its own token: extraction sees
@@ -87,26 +97,47 @@ const visible = new Map(
 const authStorage = await discoverAuthStorage();
 const modelRegistry = new ModelRegistry(authStorage);
 await modelRegistry.refresh();
-const proposals = await extractTransitions({
-	beats: todo.flatMap((b) => {
-		const a = visible.get(b.artifact.id);
-		const mechanism = a?.structured.mechanism;
-		return a
-			? [
-					{
-						id: a.id,
-						order: b.index,
-						title: a.title,
-						body: a.body,
-						...(typeof mechanism === 'string' ? { mechanism } : {})
-					}
-				]
-			: [];
-	}),
-	vocabulary: values['only-missing'] ? vocabularyOf(graph) : {},
-	authStorage,
-	modelRegistry
-});
+// One session per side, reading that side's whole chain at once: timeless facts (kinship,
+// authorship, past dates) and entity ids stay consistent across the chain, and a
+// Block–Fact side never shares an extraction context with the other side.
+const todoIds = new Set(todo.map((b) => b.artifact.id));
+const known = new Map(graph.transitions.map((t) => [t.artifactId, t.transition]));
+const sideOf = (scope: string) => SIDE[scope] ?? 'other';
+const sides = Object.entries(Object.groupBy(beats, (b) => sideOf(b.artifact.ownerScope))).filter(
+	([, chain]) => chain?.some((b) => todoIds.has(b.artifact.id))
+);
+const proposals = new Map(
+	(
+		await Promise.all(
+			sides.map(async ([, chain]) => {
+				const list = (chain ?? []).flatMap((b) => {
+					const a = visible.get(b.artifact.id);
+					const mechanism = a?.structured.mechanism;
+					const knownContract = known.get(b.artifact.id);
+					if (!a) return [];
+					return [
+						{
+							id: a.id,
+							order: b.index,
+							title: a.title,
+							body: a.body,
+							...(typeof mechanism === 'string' ? { mechanism } : {}),
+							...(todoIds.has(a.id) ? {} : { contextOnly: true, knownContract })
+						}
+					];
+				});
+				const result = await extractTransitions({
+					beats: list,
+					vocabulary: values['only-missing'] || values['only-stale'] ? vocabularyOf(graph) : {},
+					authStorage,
+					modelRegistry,
+					chunk: Math.max(6, list.length)
+				});
+				return [...result];
+			})
+		)
+	).flat()
+);
 
 let stored = 0;
 for (const b of todo) {

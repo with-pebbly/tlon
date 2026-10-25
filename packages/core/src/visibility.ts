@@ -73,6 +73,8 @@ export type GatewayAction =
 	| 'connection.write'
 	| 'completion.read'
 	| 'completion.certify'
+	| 'finding.read'
+	| 'finding.write'
 	| 'audit.read';
 
 /**
@@ -108,6 +110,8 @@ const ALLOWED: Record<Principal['role'], readonly GatewayAction[]> = {
 		'connection.write',
 		'completion.read',
 		'completion.certify',
+		'finding.read',
+		'finding.write',
 		'audit.read'
 	],
 	C: [
@@ -135,7 +139,9 @@ const ALLOWED: Record<Principal['role'], readonly GatewayAction[]> = {
 		'validation.read',
 		'triangle.read',
 		'connection.read',
-		'completion.read'
+		'completion.read',
+		'finding.read',
+		'finding.write'
 	],
 	A: [
 		'project.read',

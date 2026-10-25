@@ -31,7 +31,8 @@ import {
 	type Direction,
 	type Triangle,
 	type TriangleStatus,
-	type ValidationIssue
+	type ValidationIssue,
+	type ContinuityFinding
 } from '@tlon/contracts';
 import {
 	candidateIssues,
@@ -52,12 +53,14 @@ import {
 	expansions,
 	grants,
 	issueDismissals,
+	continuityFindings,
 	projects,
 	relations,
 	triangleContinuations,
 	triangles,
 	transitionAnnotations,
 	type ArtifactRow,
+	type ContinuityFindingRow,
 	type CandidateRow,
 	type ExpansionRow,
 	type ProjectRow,
@@ -620,6 +623,62 @@ export function withDismissals(
 	return issues.map((issue) => ({ ...issue, dismissal: dismissals.get(issue.key) ?? null }));
 }
 
+export function toFinding(
+	row: ContinuityFindingRow,
+	headRevisions: ReadonlyMap<string, string>
+): ContinuityFinding {
+	return {
+		id: row.id,
+		projectId: row.projectId,
+		kind: row.kind as ContinuityFinding['kind'],
+		severity: row.severity as ContinuityFinding['severity'],
+		artifactIds: row.artifactIds,
+		explanation: row.explanation,
+		evidence: row.evidence,
+		source: row.source as ContinuityFinding['source'],
+		reviseArtifactId: row.reviseArtifactId,
+		// A cited Block with a newer revision (or gone) was rewritten after the report.
+		stale: row.evidence.some((e) => headRevisions.get(e.artifactId) !== e.revisionId),
+		actorId: row.actorId,
+		createdAt: row.createdAt.toISOString()
+	};
+}
+
+/** Findings of a project (oldest first) with staleness computed against current heads. */
+export async function loadFindings(q: Db, projectId: string): Promise<ContinuityFinding[]> {
+	const rows = await q
+		.select()
+		.from(continuityFindings)
+		.where(eq(continuityFindings.projectId, projectId))
+		.orderBy(asc(continuityFindings.createdAt), asc(continuityFindings.id));
+	const ids = [...new Set(rows.flatMap((r) => r.evidence.map((e) => e.artifactId)))];
+	const heads = new Map<string, string>();
+	for (const part of chunk(ids, 5000)) {
+		const found = await q
+			.select({ id: artifacts.id, head: artifacts.headRevisionId })
+			.from(artifacts)
+			.where(and(eq(artifacts.projectId, projectId), inArray(artifacts.id, part)));
+		for (const a of found) heads.set(a.id, a.head);
+	}
+	return rows.map((r) => toFinding(r, heads));
+}
+
+/** A reported finding as an open issue; dismissals attach by the `finding:<id>` key. */
+export function findingIssue(f: ContinuityFinding): Omit<ValidationIssue, 'dismissal'> {
+	return {
+		key: `finding:${f.id}`,
+		kind: f.kind,
+		severity: f.severity,
+		artifactIds: f.artifactIds,
+		stateKey: null,
+		explanation: f.explanation,
+		suggestedAction: 'revise_bridge',
+		source: f.source,
+		reviseArtifactId: f.reviseArtifactId,
+		evidence: f.evidence.map((e) => ({ artifactId: e.artifactId, quote: e.quote }))
+	};
+}
+
 const TRIANGLE_IN_CHUNK = 5000;
 
 /** Triangles of a project with their continuations (no visibility filtering: callers gate on `triangle.read`). */
@@ -724,14 +783,20 @@ export async function loadIssueList(
 	principal: Principal,
 	projectId: string
 ): Promise<IssueList> {
-	const [graph, annotations, dismissals] = await Promise.all([
+	const [graph, annotations, dismissals, findings] = await Promise.all([
 		loadValidationGraph(ctx, q, principal, projectId),
 		loadLatestAnnotations(ctx, q, principal, projectId),
-		loadDismissals(q, projectId)
+		loadDismissals(q, projectId),
+		// Organizer-side readers only (HUMAN, VALIDATOR): A/B/C never get findings merged in.
+		isActionAllowed(principal, 'finding.read') ? loadFindings(q, projectId) : []
 	]);
 	const result = validateContinuity(graph, new Map(annotations.map((a) => [a.artifactId, a])));
+	const visible = new Set(graph.artifacts.map((a) => a.id));
+	const reported = findings
+		.filter((f) => !f.stale && f.artifactIds.every((id) => visible.has(id)))
+		.map(findingIssue);
 	return {
-		items: withDismissals(result.issues, dismissals),
+		items: withDismissals([...result.issues, ...reported], dismissals),
 		unannotatedArtifactIds: result.unannotatedArtifactIds
 	};
 }

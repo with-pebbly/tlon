@@ -9,8 +9,8 @@ import type {
 	ValidationIssue
 } from '@tlon/contracts';
 
-import { compareBeatTime } from './chronology.ts';
-import { entityRegistry } from './entities.ts';
+import { compareBeatTime, type TimeComparison } from './chronology.ts';
+import { entityRegistry, nameVariants } from './entities.ts';
 import { activeTriangles, type StoryBeat, storyBeats } from './story.ts';
 import { detectTensions } from './tensions.ts';
 
@@ -47,6 +47,40 @@ export function issueKey(
 }
 
 type Holder = { value: Assertion['value']; artifactId: string; irreversible: boolean };
+
+/**
+ * Kinship is recorded person-centrically as single-valued timeless assertions
+ * `subject=<person id>, predicate=<one of these>, value=<relative's person id>`
+ * ("Yakov's mother is Rivka" → `yakov.mother = rivka`). Children and siblings are
+ * expressed through the child's own `mother`/`father` keys, so no key is multi-valued.
+ */
+export const KINSHIP_PREDICATES = [
+	'mother',
+	'father',
+	'wife',
+	'husband',
+	'fiance',
+	'fiancee'
+] as const;
+
+/** One person may legitimately hold both of these toward the same relative (engaged, then married). */
+const COMPATIBLE_KINSHIP: readonly (readonly string[])[] = [
+	['fiancee', 'wife'],
+	['fiance', 'husband']
+];
+
+type KinshipClaim = { subject: string; predicate: string; target: string; artifactId: string };
+
+/** Keys of `assertions` stated with more than one distinct value, with those values. */
+function conflictingKeys(assertions: readonly Assertion[]): Map<string, Assertion['value'][]> {
+	const byKey = new Map<string, Assertion['value'][]>();
+	for (const a of assertions) {
+		const values = byKey.get(stateKey(a)) ?? [];
+		if (!values.includes(a.value)) values.push(a.value);
+		byKey.set(stateKey(a), values);
+	}
+	return new Map([...byKey].filter(([, values]) => values.length > 1));
+}
 
 /**
  * Replays world-state transitions along the committed reading path (story order)
@@ -113,7 +147,9 @@ export function validateContinuity(
 				artifactIds: ids,
 				stateKey: key,
 				explanation,
-				suggestedAction
+				suggestedAction,
+				source: 'replay',
+				evidence: []
 			});
 		}
 	};
@@ -249,7 +285,7 @@ export function validateContinuity(
 			}
 			if (time?.year !== undefined && !time.outOfOrder) {
 				// `approx` widens a year by ±1; `relative`-only beats never reach this point.
-				const tolerance = time.approx ? 1 : 0;
+				const tolerance = time.yearApprox ? 1 : 0;
 				if (lastYear && time.year + tolerance + lastYear.tolerance < lastYear.year) {
 					push(
 						'temporal_order',
@@ -375,6 +411,9 @@ export function validateContinuity(
 		const preparations = new Map<string, string>();
 		const path = chain.map((b) => b.artifact.id);
 		paths.push(path);
+		// Timeless facts are checked per chain against the first value stated for each key.
+		const timelessRef = new Map<string, { value: Assertion['value']; artifactId: string }>();
+		const kinship: KinshipClaim[] = [];
 
 		for (const { artifact } of chain) {
 			const t = transitionOf(artifact.id);
@@ -397,7 +436,79 @@ export function validateContinuity(
 					eventsDone.set(event, artifact.id);
 				}
 			}
-			for (const a of [...t.preconditions, ...t.effects]) checkMonotonic(a, artifact.id, at);
+			// One Block stating a key as several values is ambiguous: it neither sets state nor is checked.
+			const worldEffects = t.effects.filter((a) => a.epistemic === 'world' && !a.timeless);
+			const worldPreconditions = t.preconditions.filter(
+				(a) => a.epistemic === 'world' && !a.timeless
+			);
+			const timelessHere = [...t.preconditions, ...t.effects, ...t.assumptions].filter(
+				(a) => a.epistemic === 'world' && a.timeless
+			);
+			const ambiguous = new Set<string>();
+			for (const [where, list] of [
+				['effects', worldEffects],
+				['preconditions', worldPreconditions],
+				['timeless assertions', timelessHere]
+			] as const) {
+				for (const [key, values] of conflictingKeys(list)) {
+					ambiguous.add(key);
+					push(
+						'annotation_conflict',
+						'info',
+						[artifact.id],
+						key,
+						`${title(artifact.id)} states ${key} as ${values.map(String).join(' and ')} within its ${where}; the annotation is ambiguous there, so ${key} neither sets state nor is checked. This is the shape of the annotation, not the story.`,
+						'keep_as_is'
+					);
+				}
+			}
+			const seenTimeless = new Set<string>();
+			for (const a of timelessHere) {
+				const key = stateKey(a);
+				if (ambiguous.has(key) || seenTimeless.has(key)) continue;
+				seenTimeless.add(key);
+				if (KINSHIP_PREDICATES.some((p) => p === a.predicate) && typeof a.value === 'string') {
+					kinship.push({
+						subject: a.subject,
+						predicate: a.predicate,
+						target: a.value,
+						artifactId: artifact.id
+					});
+				}
+				const reference = timelessRef.get(key);
+				if (!reference) {
+					timelessRef.set(key, { value: a.value, artifactId: artifact.id });
+					continue;
+				}
+				if (reference.value === a.value) continue;
+				if (
+					!blockFact &&
+					provenance(reference.artifactId) === 'canonical_anchor' &&
+					provenance(artifact.id) === 'canonical_anchor' &&
+					artifacts.get(reference.artifactId)?.creatorRole !== artifact.creatorRole
+				) {
+					push(
+						'tension',
+						'info',
+						[reference.artifactId, artifact.id],
+						key,
+						`Independent sources disagree on ${key}: ${String(reference.value)} in ${title(reference.artifactId)} but ${String(a.value)} in ${title(artifact.id)}. A bridge can reconcile this.`,
+						'request_c_resolution'
+					);
+					continue;
+				}
+				push(
+					'fact_conflict',
+					'blocker',
+					[reference.artifactId, artifact.id],
+					key,
+					`${key} is ${String(reference.value)} in ${title(reference.artifactId)} but ${String(a.value)} in ${title(artifact.id)}. Identity, kinship, authorship and the date or place of a past event cannot change off-page, however far apart the Blocks are.`,
+					'revise_bridge'
+				);
+			}
+			for (const a of [...t.preconditions, ...t.effects]) {
+				if (!a.timeless && !ambiguous.has(stateKey(a))) checkMonotonic(a, artifact.id, at);
+			}
 			const ann = annotations.get(artifact.id);
 			if (
 				ann &&
@@ -415,7 +526,7 @@ export function validateContinuity(
 			}
 			for (const pre of t.preconditions) {
 				const key = stateKey(pre);
-				if (pre.epistemic !== 'world') continue;
+				if (pre.epistemic !== 'world' || pre.timeless || ambiguous.has(key)) continue;
 				preparations.delete(key);
 				const cur = world.get(key);
 				if (cur && cur.value !== pre.value) {
@@ -446,6 +557,13 @@ export function validateContinuity(
 					}
 					list.push({ value: eff.value, holder, artifactId: artifact.id });
 					beliefs.set(key, list);
+					continue;
+				}
+				if (eff.timeless) continue;
+				if (ambiguous.has(key)) {
+					// Which value holds afterwards is unknown: forget the earlier holder.
+					world.delete(key);
+					preparations.delete(key);
 					continue;
 				}
 				const done = irreversibleDone.get(key);
@@ -500,6 +618,41 @@ export function validateContinuity(
 				);
 			}
 		}
+
+		// ── identity: name variants must not carry incompatible kinship toward one person ──
+		const chainEntities = new Map(
+			entityRegistry(
+				chain.flatMap((b) => {
+					const transition = transitionOf(b.artifact.id);
+					return transition ? [{ artifactId: b.artifact.id, transition }] : [];
+				})
+			).map((entity) => [entity.id, entity])
+		);
+		const nameOf = (id: string) => chainEntities.get(id)?.name ?? id;
+		for (const [i, first] of kinship.entries()) {
+			for (const second of kinship.slice(i + 1)) {
+				if (first.subject !== second.subject || first.predicate === second.predicate) continue;
+				if (
+					COMPATIBLE_KINSHIP.some(
+						(pair) => pair.includes(first.predicate) && pair.includes(second.predicate)
+					)
+				) {
+					continue;
+				}
+				const a = chainEntities.get(first.target);
+				const b = chainEntities.get(second.target);
+				if (first.target !== second.target && !(a && b && nameVariants(a, b))) continue;
+				const claims = [first, second].map((c) => `${c.subject}.${c.predicate}`).toSorted();
+				push(
+					'identity_conflict',
+					'warning',
+					[...new Set([first.artifactId, second.artifactId])],
+					claims.join('|'),
+					`“${nameOf(first.subject)}” (${first.subject}) has ${first.predicate} “${nameOf(first.target)}” (${first.target}) in ${title(first.artifactId)} but ${second.predicate} “${nameOf(second.target)}” (${second.target}) in ${title(second.artifactId)}. ${first.target === second.target ? 'One person cannot hold both roles toward the same person.' : 'The two names look like variants of one person, who would then hold both roles; either the text is inconsistent or two characters share a near-identical name.'} They are kept as distinct entities and never merged.`,
+					'revise_bridge'
+				);
+			}
+		}
 	};
 
 	const liveTriangles = activeTriangles(graph.triangles);
@@ -514,8 +667,12 @@ export function validateContinuity(
 	for (const chain of chains) replayChain(chain);
 
 	// ── Block–Fact: a continuation must not contradict the direction it was asked to write in ──
-	const describeTime = (time: BeatTime, component: 'year' | 'day' | 'minute') => {
+	const describeTime = (time: BeatTime, component: TimeComparison['component']) => {
+		const two = (n: number | undefined) => String(n).padStart(2, '0');
 		if (component === 'year') return `year ${time.year}`;
+		if (component === 'month') return `${time.year}-${two(time.month)}`;
+		if (component === 'dayOfMonth')
+			return `${time.year}-${two(time.month)}-${two(time.dayOfMonth)}`;
 		if (component === 'day') return `day ${time.day}`;
 		const minute = time.minute ?? 0;
 		const clock = `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
@@ -553,17 +710,25 @@ export function validateContinuity(
 			return transition ? [{ artifactId: b.artifact.id, transition }] : [];
 		})
 	);
-	const names = registry.map((entity) => {
-		const full = entity.name.trim().toLowerCase();
-		return { entity, full, first: full.split(/\s+/)[0] ?? full };
-	});
+	const names = registry.map((entity) => ({
+		entity,
+		forms: [entity.name, ...entity.aliases].map((name) => {
+			const full = name.trim().toLowerCase();
+			return { full, first: full.split(/\s+/)[0] ?? full };
+		})
+	}));
 	for (const [i, a] of names.entries()) {
 		for (const b of names.slice(i + 1)) {
-			const alike =
-				a.full === b.full ||
-				a.first === b.full ||
-				b.first === a.full ||
-				(a.entity.kind === 'person' && b.entity.kind === 'person' && a.first === b.first);
+			const bothPeople = a.entity.kind === 'person' && b.entity.kind === 'person';
+			const alike = a.forms.some((fa) =>
+				b.forms.some(
+					(fb) =>
+						fa.full === fb.full ||
+						fa.first === fb.full ||
+						fb.first === fa.full ||
+						(bothPeople && fa.first === fb.first)
+				)
+			);
 			if (!alike) continue;
 			const ids = [...new Set([a.entity.artifactIds[0], b.entity.artifactIds[0]])].filter(
 				(id): id is string => id !== undefined

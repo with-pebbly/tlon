@@ -242,6 +242,25 @@ export function buildApp({ service, logger, operatorToken }: BuildAppOptions): F
 	app.post<ProjectParams>(`${project}/issues/dismiss`, async (request) =>
 		service.dismissIssue(await act(request), request.params.projectId, request.body)
 	);
+	app.post<ProjectParams>(`${project}/issues/request-revision`, async (request, reply) => {
+		const task = await service.requestRevision(
+			await act(request),
+			request.params.projectId,
+			request.body
+		);
+		return reply.code(201).send(task);
+	});
+	app.get<ProjectParams>(`${project}/findings`, async (request) =>
+		service.listFindings(await act(request), request.params.projectId)
+	);
+	app.post<ProjectParams>(`${project}/findings`, async (request, reply) => {
+		const finding = await service.createFinding(
+			await act(request),
+			request.params.projectId,
+			request.body
+		);
+		return reply.code(201).send(finding);
+	});
 
 	app.post<ProjectParams>(`${project}/composites`, async (request, reply) => {
 		const created = await service.createComposite(

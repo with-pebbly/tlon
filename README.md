@@ -117,10 +117,20 @@ A shared Fact links two Blocks; it is never read as causality. The facilitator's
   `resolved`); certification is refused with reasons when the policy isn't met.
 - **Isolation audit**: per task, the IDs it was served (input manifest), plus server-side
   deny checks of every A/B participant against the other side's Blocks.
+- **Continuity issues**: computed from annotations (state replay, timeless facts such as
+  kinship, authorship and past dates, calendar order) and **findings** reported by a
+  continuity audit or a facilitator. A finding must quote the Blocks verbatim; the server
+  rejects quotes that aren't in the text. **Request revision** sends a side-local issue to
+  the side that owns it as a `revise_block` task: that writer sees only their own line and
+  the quoted problem, and the revision becomes a new version of the same Block.
 
-`pnpm analyze --project <id> --out story.md` runs the independent extraction (eras,
-entities with stable ids, beat functions) and the AI join review, then writes the reader
-story, `-organizer.md` and `-chronology.md`. `pnpm agents` runs it automatically.
+`pnpm analyze --project <id> --out story.md [--repair-rounds 2]` runs the per-side
+extraction (calendar dates, timeless facts, entities with stable ids), a grounded
+continuity audit per side, the repair loop (only Blocks the auditor judged to deviate from
+the rest of their line are revised, by that side's writer, then re-checked), the AI join
+review, and writes the reader story, `-organizer.md` and `-chronology.md`. `pnpm agents`
+runs it automatically. `docs/samples/belki-v1/` keeps a frozen story with known defects;
+`apps/api/test/regression-belki.test.ts` checks they stay detected.
 
 Protected mode: set `TLON_OPERATOR_TOKEN` to disable tokenless operator access. Without
 it a participant on the same machine could open facilitator pages, so isolation between

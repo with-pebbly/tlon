@@ -30,6 +30,10 @@
 	let certifying = $state(false);
 	/** Reasons of the last refused certification (409 COMPLETION_BLOCKED). */
 	let refused = $state.raw<{ policy: CompletionPolicy; reasons: string[] } | null>(null);
+	/** Strictest policy the project can be certified under right now (policy order = strictness). */
+	const highest = $derived(
+		POLICIES.findLast((option) => report?.certifiableAs[option] === true) ?? null
+	);
 
 	$effect(() => {
 		const current = policy;
@@ -201,17 +205,46 @@
 			</div>
 		{/if}
 
+		<div class="flex flex-col gap-1" data-testid="certifiable-as">
+			<h3 class="section-title">
+				Certifiable as · highest: {highest === null ? 'none' : COMPLETION_POLICY_LABEL[highest]}
+			</h3>
+			<table class="w-full text-left text-[13px]">
+				<tbody>
+					{#each POLICIES as option (option)}
+						{@const ok = report.certifiableAs[option]}
+						<tr
+							class={[
+								option === report.policy && 'bg-accent-50 font-medium ring-1 ring-accent-200'
+							]}
+							data-policy={option}
+							data-certifiable={ok}
+						>
+							<td class="px-1.5 py-0.5" title={COMPLETION_POLICY_HINT[option]}
+								>{COMPLETION_POLICY_LABEL[option]}{option === report.policy
+									? ' · requested'
+									: ''}</td
+							>
+							<td class={['px-1.5 py-0.5 text-right', ok ? 'text-emerald-700' : 'text-rose-700']}
+								>{ok ? '✓ certifiable' : '✗ not certifiable'}</td
+							>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		</div>
+
 		<div
 			class={[
 				'flex flex-col gap-1 rounded border px-2 py-1.5 text-sm',
-				report.certifiable
+				report.certifiableAs[report.policy]
 					? 'border-emerald-300 bg-emerald-50 text-emerald-900'
 					: 'border-amber-300 bg-amber-50 text-amber-900'
 			]}
 			data-testid="certifiable"
 		>
 			<span class="font-medium"
-				>{report.certifiable
+				>{report.certifiableAs[report.policy]
 					? `Certifiable as “${COMPLETION_POLICY_LABEL[report.policy]}”`
 					: `Not certifiable as “${COMPLETION_POLICY_LABEL[report.policy]}”`}</span
 			>

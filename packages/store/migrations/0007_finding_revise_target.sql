@@ -1,0 +1,1 @@
+ALTER TABLE "continuity_findings" ADD COLUMN "revise_artifact_id" uuid;

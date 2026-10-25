@@ -1,4 +1,4 @@
-import type { CompletionReport, InputManifest } from '@tlon/contracts';
+import type { CompletionReport, InputManifest, ReviseTaskPayload } from '@tlon/contracts';
 import { sql } from 'drizzle-orm';
 import {
 	boolean,
@@ -576,6 +576,8 @@ export const protocolTasks = pgTable(
 			.notNull(),
 		submitIdempotencyKey: text('submit_idempotency_key'),
 		inputManifest: jsonb('input_manifest').$type<InputManifest>(),
+		/** `revise_block` only: the artifact, issue key, problems and note the task was opened with. */
+		payload: jsonb('payload').$type<ReviseTaskPayload>(),
 		createdAt: ts('created_at').notNull(),
 		submittedAt: ts('submitted_at')
 	},
@@ -685,6 +687,33 @@ export const completionCertifications = pgTable(
 	(t) => [index('completion_certifications_project_idx').on(t.projectId, t.createdAt)]
 );
 
+/**
+ * A grounded continuity problem reported by an audit or a facilitator. Citations are pinned
+ * to the head revision they were checked against; a newer head makes the finding stale.
+ */
+export const continuityFindings = pgTable(
+	'continuity_findings',
+	{
+		id: uuid('id').primaryKey(),
+		projectId: uuid('project_id')
+			.notNull()
+			.references(() => projects.id),
+		kind: text('kind').notNull(),
+		severity: text('severity').notNull(),
+		artifactIds: jsonb('artifact_ids').$type<string[]>().notNull(),
+		explanation: text('explanation').notNull(),
+		evidence: jsonb('evidence')
+			.$type<Array<{ artifactId: string; revisionId: string; quote: string }>>()
+			.notNull(),
+		source: text('source').notNull(),
+		/** The Block the reporter judged to deviate (revise target); one of `artifactIds`. */
+		reviseArtifactId: uuid('revise_artifact_id'),
+		actorId: text('actor_id').notNull(),
+		createdAt: ts('created_at').notNull()
+	},
+	(t) => [index('continuity_findings_project_idx').on(t.projectId, t.createdAt)]
+);
+
 export type CompositeDefinitionRow = typeof compositeDefinitions.$inferSelect;
 export type CompositeMemberRow = typeof compositeMembers.$inferSelect;
 
@@ -706,3 +735,4 @@ export type FactCandidateRow = typeof factCandidates.$inferSelect;
 export type NarrativeConnectionRow = typeof narrativeConnections.$inferSelect;
 export type CompletionCertificationRow = typeof completionCertifications.$inferSelect;
 export type FactAnchorRow = typeof factAnchors.$inferSelect;
+export type ContinuityFindingRow = typeof continuityFindings.$inferSelect;

@@ -71,9 +71,13 @@
 			{#each transition.entities as entity, i (`${i}:${entity.id}`)}
 				<span
 					class="chip border-zinc-300 bg-white text-zinc-800"
-					title="{entity.kind} · id {entity.id} — identity is the id, not the name"
+					title="{entity.kind} · id {entity.id}{entity.aliases.length > 0
+						? ` · also ${entity.aliases.join(', ')}`
+						: ''} — identity is the id, not the name"
 					>{entity.name}{#if entity.distinguishing}<span class="ml-1 text-zinc-500"
 							>({entity.distinguishing})</span
+						>{/if}{#if entity.aliases.length > 0}<span class="ml-1 text-zinc-500"
+							>aka {entity.aliases.join(', ')}</span
 						>{/if}<span class="ml-1 font-mono text-[10px] text-zinc-400">{entity.id}</span></span
 				>
 			{/each}

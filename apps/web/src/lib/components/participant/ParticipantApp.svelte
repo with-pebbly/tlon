@@ -12,6 +12,7 @@
 
 	import AdvanceEditor from './AdvanceEditor.svelte';
 	import ProposeFactEditor from './ProposeFactEditor.svelte';
+	import ReviseEditor from './ReviseEditor.svelte';
 	import SeedEditor from './SeedEditor.svelte';
 
 	/** Inbox refresh while waiting for the next task (the other side may still be writing). */
@@ -179,8 +180,10 @@
 						<SeedEditor {view} {busy} onsubmit={submit} />
 					{:else if view.type === 'propose_fact'}
 						<ProposeFactEditor {view} {busy} onsubmit={submit} />
-					{:else}
+					{:else if view.type === 'advance_block'}
 						<AdvanceEditor {view} {busy} onsubmit={submit} />
+					{:else}
+						<ReviseEditor {view} {busy} onsubmit={submit} />
 					{/if}
 				{/key}
 				{#if submitError}

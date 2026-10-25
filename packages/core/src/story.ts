@@ -3,11 +3,13 @@ import {
 	type AuditReport,
 	type BeatTime,
 	type CompletionReport,
+	CompletionPolicy,
 	CONNECTION_KINDS,
 	type NarrativeConnection,
 	type ProjectGraph,
 	type Transition,
-	type Triangle
+	type Triangle,
+	type ValidationIssue
 } from '@tlon/contracts';
 
 import { chronologicalOrder } from './chronology.ts';
@@ -75,11 +77,25 @@ export type StoryRenderOptions = {
 	connections?: readonly NarrativeConnection[];
 	completion?: CompletionReport;
 	audit?: AuditReport;
+	/** Continuity issues (already merged with dismissals); open blockers/warnings get an organizer section. */
+	issues?: readonly ValidationIssue[];
 };
 
 const formatTime = (time: BeatTime) => {
 	const parts: string[] = [];
-	if (time.year !== undefined) parts.push(`${time.approx ? '~' : ''}${time.year}`);
+	if (time.year !== undefined) {
+		const two = (n: number) => String(n).padStart(2, '0');
+		const date = [`${time.yearApprox ? '~' : ''}${time.year}`];
+		if (time.month !== undefined) date.push(two(time.month));
+		if (time.month !== undefined && time.dayOfMonth !== undefined) date.push(two(time.dayOfMonth));
+		parts.push(date.join('-'));
+	} else if (time.month !== undefined) {
+		parts.push(
+			time.dayOfMonth === undefined
+				? `month ${time.month}`
+				: `month ${time.month}, day ${time.dayOfMonth}`
+		);
+	}
 	if (time.day !== undefined) parts.push(`day ${time.day}`);
 	if (time.minute !== undefined) {
 		parts.push(
@@ -227,6 +243,24 @@ export function renderStoryMarkdown(graph: GraphLike, options: StoryRenderOption
 		}
 	}
 
+	if (options.issues) {
+		const rank: Record<ValidationIssue['severity'], number> = { blocker: 0, warning: 1, info: 2 };
+		const open = options.issues
+			.filter((i) => i.dismissal === null && i.severity !== 'info')
+			.toSorted((a, b) => rank[a.severity] - rank[b.severity]);
+		tail.push('## Continuity issues (organizer)', '');
+		if (open.length === 0) tail.push('_No open blocking or warning issues._', '');
+		for (const issue of open) {
+			tail.push(
+				`- **${issue.kind}** (${issue.severity}; source: ${issue.source}) — ${issue.artifactIds.map(ref).join(', ')}: ${issue.explanation.trim()}`
+			);
+			for (const e of issue.evidence) {
+				tail.push(`  > «${e.quote.replace(/\s+/g, ' ').trim()}» — ${ref(e.artifactId)}`);
+			}
+		}
+		if (open.length > 0) tail.push('');
+	}
+
 	const report = options.completion;
 	if (report) {
 		const questions = report.openQuestions.flatMap((q) => [
@@ -239,10 +273,12 @@ export function renderStoryMarkdown(graph: GraphLike, options: StoryRenderOption
 			`  - block: ${yamlText(ref(m.artifactId))}`,
 			`    signal: ${yamlText(m.signal)}`
 		]);
+		const highest = CompletionPolicy.options.findLast((p) => report.certifiableAs[p]);
 		tail.push(
 			'## Completion report (organizer)',
 			'',
 			'```yaml',
+			`# highest certifiable policy: ${highest ?? 'none'}`,
 			`policy: ${report.policy}`,
 			`connected_fact_pairs: ${report.connectedFactPairs}`,
 			`confirmed_cross_branch_causal_paths: ${report.confirmedCrossBranchCausalPaths}`,
@@ -250,6 +286,8 @@ export function renderStoryMarkdown(graph: GraphLike, options: StoryRenderOption
 			`chronology_conflicts: ${report.chronologyConflicts}`,
 			`isolation_verified: ${report.isolationVerified}`,
 			`certifiable: ${report.certifiable}`,
+			'certifiable_as:',
+			...CompletionPolicy.options.map((p) => `  ${p}: ${report.certifiableAs[p]}`),
 			...(report.reasons.length > 0
 				? ['reasons:', ...report.reasons.map((r) => `  - ${yamlText(r)}`)]
 				: ['reasons: []']),

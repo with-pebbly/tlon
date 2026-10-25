@@ -189,6 +189,7 @@ export const TASK_TYPES = [
 	'seed_block',
 	'propose_fact',
 	'advance_block',
+	'revise_block',
 	'review_triangle',
 	'compose_subgraph'
 ] as const;
@@ -237,6 +238,23 @@ export const StartRunInput = z.object({
 });
 export type StartRunInput = z.input<typeof StartRunInput>;
 
+/**
+ * Stored with a `revise_block` task: which Block of the owning side to repair, the
+ * continuity issue it came from, the problems (side-local evidence only) and the note.
+ */
+export const ReviseTaskPayload = z.object({
+	artifactId: Uuid,
+	issueKey: z.string(),
+	problems: z.array(
+		z.object({
+			explanation: z.string(),
+			evidence: z.array(z.object({ blockId: Uuid, quote: z.string() }))
+		})
+	),
+	instructions: z.string().nullable()
+});
+export type ReviseTaskPayload = z.infer<typeof ReviseTaskPayload>;
+
 export const Task = z.object({
 	id: Uuid,
 	projectId: Uuid,
@@ -254,7 +272,9 @@ export const Task = z.object({
 	/** Artifacts this task produced (Blocks, Fact candidates). */
 	resultRefs: z.array(RevisionRef),
 	createdAt: IsoDate,
-	submittedAt: IsoDate.nullable()
+	submittedAt: IsoDate.nullable(),
+	/** What a `revise_block` task asks for; facilitator/organizer reads only (null for A/B). */
+	payload: ReviseTaskPayload.nullable().optional()
 });
 export type Task = z.infer<typeof Task>;
 
@@ -310,6 +330,26 @@ export const TaskView = z.discriminatedUnion('type', [
 		localContext: z.array(BlockView),
 		fact: FactView,
 		direction: Direction
+	}),
+	z.object({
+		/**
+		 * The owning side revises one of its own Blocks to repair a continuity problem
+		 * inside its own chain. Everything in the view belongs to the executor's scope:
+		 * the problems cite only Blocks of that side (cross-side issues are never sent).
+		 */
+		type: z.literal('revise_block'),
+		task: Task,
+		ownBlock: BlockView,
+		/** The executor's whole side chain in reading order (includes `ownBlock`). */
+		localContext: z.array(BlockView),
+		problems: z.array(
+			z.object({
+				explanation: z.string(),
+				evidence: z.array(z.object({ blockId: Uuid, quote: z.string() }))
+			})
+		),
+		/** Optional facilitator note. */
+		instructions: z.string().nullable()
 	})
 ]);
 export type TaskView = z.infer<typeof TaskView>;
@@ -327,7 +367,9 @@ export const TaskSubmission = z.discriminatedUnion('type', [
 		type: z.literal('propose_fact'),
 		candidates: z.array(FactCandidateInput).min(1).max(5)
 	}),
-	z.object({ type: z.literal('advance_block'), block: BlockDraft })
+	z.object({ type: z.literal('advance_block'), block: BlockDraft }),
+	/** New revision of `ownBlock` (same artifact, same id). */
+	z.object({ type: z.literal('revise_block'), block: BlockDraft })
 ]);
 export type TaskSubmission = z.input<typeof TaskSubmission>;
 
@@ -516,7 +558,17 @@ export const CompletionReport = z.object({
 	motifSignals: z.array(z.object({ artifactId: Uuid, signal: z.string() })),
 	/** Whether `policy` can be certified now, and why not. */
 	certifiable: z.boolean(),
-	reasons: z.array(z.string())
+	reasons: z.array(z.string()),
+	/**
+	 * Certifiability under every policy, so "certifiable" is never read without its level
+	 * (an exploratory draft is not a causally joined story).
+	 */
+	certifiableAs: z.object({
+		exploratory: z.boolean(),
+		coherent_open_mystery: z.boolean(),
+		causally_connected: z.boolean(),
+		resolved: z.boolean()
+	})
 });
 export type CompletionReport = z.infer<typeof CompletionReport>;
 
